@@ -152,7 +152,8 @@ class OllamaClient:
         model: str,
         user_prompt: str,
         system_prompt: Optional[str] = None,
-        timeout: float = 60.0
+        timeout: float = 120.0,
+        options: Optional[Dict[str, Any]] = None,
     ) -> Any:
         url = base_url.rstrip("/")
         if not url.startswith("http"):
@@ -166,6 +167,7 @@ class OllamaClient:
         }
         if system_prompt:
             payload["system"] = system_prompt
+        payload["options"] = options or {"temperature": 0.1, "num_predict": 384}
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(f"{url}/api/generate", json=payload)
@@ -181,7 +183,7 @@ class OllamaClient:
         fallback_models: List[str],
         user_prompt: str,
         system_prompt: Optional[str] = None,
-        timeout: float = 60.0,
+        timeout: float = 120.0,
     ) -> Dict[str, Any]:
         models_to_try = [primary_model] + [m for m in fallback_models if m and m != primary_model]
         last_error = None
@@ -201,8 +203,9 @@ class OllamaClient:
                     continue
                 return {"success": True, "text": text, "model_used": model}
             except Exception as e:
-                logger.warning(f"Model {model} failed: {e}. Falling back to next model...")
-                last_error = str(e)
+                err_msg = f"{type(e).__name__}: {str(e)}" if str(e) else type(e).__name__
+                logger.warning(f"Model {model} failed: {err_msg}. Falling back to next model...")
+                last_error = err_msg
                 continue
 
         raise RuntimeError(f"All Ollama models ({models_to_try}) failed or triggered safety blocks. Last error: {last_error}")
@@ -214,30 +217,27 @@ class OllamaClient:
         fallback_models: List[str],
         user_prompt: str,
         system_prompt: Optional[str] = None,
-        timeout: float = 60.0,
+        timeout: float = 120.0,
+        options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         models_to_try = [primary_model] + [m for m in fallback_models if m and m != primary_model]
         last_error = None
 
         for model in models_to_try:
             try:
-                raw_text = await OllamaClient.query_model_text(
+                parsed = await OllamaClient.query_model_json(
                     base_url=base_url,
                     model=model,
-                    user_prompt=user_prompt + "\n\nCRITICAL: Reply ONLY with valid JSON conforming to the requested schema. Do not include markdown preamble or conversational apologies.",
+                    user_prompt=user_prompt + "\n\nCRITICAL: Reply ONLY with valid JSON conforming to the requested schema.",
                     system_prompt=system_prompt,
                     timeout=timeout,
+                    options=options,
                 )
-                if is_safety_refusal(raw_text):
-                    logger.warning(f"Model {model} triggered safety refusal/block. Falling back to next model...")
-                    last_error = f"Safety block on {model}"
-                    continue
-
-                parsed = extract_json_from_llm(raw_text)
-                return {"success": True, "data": parsed, "model_used": model, "raw_response": raw_text}
+                return {"success": True, "data": parsed, "model_used": model}
             except Exception as e:
-                logger.warning(f"Model {model} failed to produce valid JSON or errored: {e}. Falling back...")
-                last_error = str(e)
+                err_msg = f"{type(e).__name__}: {str(e)}" if str(e) else type(e).__name__
+                logger.warning(f"Model {model} failed in JSON query: {err_msg}. Falling back...")
+                last_error = err_msg
                 continue
 
         raise RuntimeError(f"All Ollama models ({models_to_try}) failed or triggered safety blocks. Last error: {last_error}")

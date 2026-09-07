@@ -39,6 +39,21 @@ export const ShowDetail: React.FC<ShowDetailProps> = ({ showId, onBack, onJobSta
     }
   };
 
+  const [auditing, setAuditing] = useState(false);
+
+  const handleAuditShow = async () => {
+    if (!show) return;
+    setAuditing(true);
+    try {
+      const res = await api.auditShow(show.id);
+      onJobStarted([res.job_id]);
+    } catch (err: any) {
+      alert(err.message || 'Failed to start AI audit');
+    } finally {
+      setAuditing(false);
+    }
+  };
+
   const handleRescanShow = async () => {
     if (!show) return;
     try {
@@ -138,14 +153,22 @@ export const ShowDetail: React.FC<ShowDetailProps> = ({ showId, onBack, onJobSta
           </div>
         </div>
 
-        {/* Action: Rescan */}
-        <div className="flex-shrink-0">
+        {/* Actions: AI Audit & Rescan */}
+        <div className="flex-shrink-0 flex items-center gap-3">
+          <button
+            onClick={handleAuditShow}
+            disabled={auditing}
+            className="flex items-center space-x-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold shadow-lg shadow-purple-600/30 transition-all hover:scale-105 disabled:opacity-50"
+          >
+            <Sparkles className="w-4 h-4 text-purple-200 animate-pulse" />
+            <span>{auditing ? 'Starting Audit...' : 'Audit with AI'}</span>
+          </button>
           <button
             onClick={handleRescanShow}
-            className="flex items-center space-x-2 bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-xl text-xs sm:text-sm font-semibold shadow-lg shadow-indigo-600/30 transition-all hover:scale-105"
+            className="flex items-center space-x-2 bg-dark-800 hover:bg-dark-700 text-slate-300 hover:text-white px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold border border-dark-600 transition-all"
           >
             <RefreshCw className="w-4 h-4" />
-            <span>Sync from Sonarr</span>
+            <span>Sync Sonarr</span>
           </button>
         </div>
       </div>

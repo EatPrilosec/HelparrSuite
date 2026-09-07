@@ -43,6 +43,8 @@ def read_config_file() -> Dict[str, Any]:
 
 
 def write_config_file(data: Dict[str, Any]) -> bool:
+    if os.getenv("DBARR_TESTING") == "1":
+        return True
     cfg_file = get_config_file_path()
     try:
         cfg_file.parent.mkdir(parents=True, exist_ok=True)

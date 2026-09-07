@@ -1,17 +1,17 @@
+import os
 import pytest
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from backend.app.core.database import Base
 
-
-@pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+os.environ["DBARR_TESTING"] = "1"
 
 
-@pytest.fixture
+
+
+import pytest_asyncio
+
+@pytest_asyncio.fixture
 async def test_db():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:

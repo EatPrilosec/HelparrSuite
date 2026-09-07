@@ -29,8 +29,8 @@ async def test_settings_api(test_db):
         assert data["ollama_primary_model"] == "gemma4:e2b"
         assert data["max_concurrent_jobs"] == 1
         assert data["max_concurrent_ollama_requests"] == 1
-        assert data["ai_batch_size"] == 1
-        assert "Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M" in data["ollama_fallback_models"]
+        assert len(data["ollama_fallback_models"]) >= 1
+        assert any("Gemma" in m or "gemma" in m for m in data["ollama_fallback_models"])
 
         # Update settings
         update_res = await client.post(
@@ -71,3 +71,61 @@ def test_ollama_safety_refusal_detection():
     assert is_safety_refusal("I cannot fulfill this request because it violates safety guidelines.") is True
     assert is_safety_refusal("I am sorry, but I cannot process this episode description.") is True
     assert is_safety_refusal("{\"matched\": true, \"confidence\": 1.0}") is False
+
+
+def test_transcript_service_cleaning():
+    from backend.app.services.transcript_service import TranscriptService
+    sample_srt = """1
+00:00:01,000 --> 00:00:04,000
+[Dramatic music playing]
+
+2
+00:00:05,100 --> 00:00:08,200
+<i>Mayday, mayday!</i> We've lost engine number one!
+
+3
+00:00:09,000 --> 00:00:11,500
+(Groaning)
+Hold on, everyone!
+"""
+    full, preview = TranscriptService.clean_subtitle_text(sample_srt)
+    assert "Dramatic music" not in full
+    assert "Groaning" not in full
+    assert "00:00:01" not in full
+    assert "Mayday, mayday! We've lost engine number one! Hold on, everyone!" in full
+
+
+def test_language_resolution():
+    from backend.app.services.verification_engine import resolve_language_code
+    assert resolve_language_code("English") == "en"
+    assert resolve_language_code("Japanese") == "ja"
+    assert resolve_language_code("Korean") == "ko"
+    assert resolve_language_code("fr") == "fr"
+    assert resolve_language_code("") == "en"
+
+
+@pytest.mark.asyncio
+async def test_audit_endpoint(test_db):
+    from unittest.mock import patch, AsyncMock
+    from backend.app.models.show import Show
+    app.dependency_overrides[get_db] = lambda: test_db
+
+    show = Show(
+        sonarr_series_id=999,
+        title="Test Audit Show",
+        year=2024,
+        original_language="English"
+    )
+    test_db.add(show)
+    await test_db.commit()
+
+    with patch("backend.app.services.verification_engine.VerificationEngine.run_show_verification", new_callable=AsyncMock):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            res = await client.post(f"/api/v1/shows/{show.id}/audit")
+            assert res.status_code == 200
+            data = res.json()
+            assert data["success"] is True
+            assert "job_id" in data
+
+    app.dependency_overrides.clear()

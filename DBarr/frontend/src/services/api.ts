@@ -57,6 +57,18 @@ export const api = {
     return res.json();
   },
 
+  async auditShow(showId: number): Promise<{ success: boolean; job_id: number; message: string }> {
+    const res = await fetch(`${API_BASE}/shows/${showId}/audit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to queue audit' }));
+      throw new Error(err.detail || 'Failed to queue audit');
+    }
+    return res.json();
+  },
+
   // Jobs
   async getJobs(): Promise<Job[]> {
     const res = await fetch(`${API_BASE}/jobs`);

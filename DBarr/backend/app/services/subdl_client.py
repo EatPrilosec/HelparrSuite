@@ -59,8 +59,26 @@ class SubDLClient:
 
     @staticmethod
     async def download_subtitle_content(url: str) -> Optional[str]:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            response = await client.get(url)
-            if response.status_code == 200:
-                return response.text
+        target_url = url.strip()
+        if target_url.startswith("/"):
+            target_url = f"https://dl.subdl.com{target_url}"
+
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+            try:
+                response = await client.get(target_url)
+                if response.status_code == 200:
+                    raw_bytes = response.content
+                    # SubDL commonly delivers ZIP archives containing .srt files
+                    if raw_bytes.startswith(b"PK"):
+                        import zipfile, io
+                        try:
+                            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+                                srt_files = [f for f in zf.namelist() if f.lower().endswith((".srt", ".vtt", ".sub", ".txt"))]
+                                if srt_files:
+                                    return zf.read(srt_files[0]).decode("utf-8", errors="ignore")
+                        except Exception as e:
+                            pass
+                    return response.text
+            except Exception:
+                pass
         return None

@@ -23,6 +23,7 @@ from backend.app.schemas.show import (
 from backend.app.services.sonarr_client import SonarrClient
 from backend.app.services.concurrency_manager import concurrency_manager
 from backend.app.core.config_manager import read_config_file, get_env_overrides
+from backend.app.services.verification_engine import VerificationEngine
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/shows", tags=["shows"])
@@ -319,14 +320,22 @@ async def run_import_pipeline(sonarr_series_id: int, job_id: int, scan_mode: str
 
                 await db.commit()
 
-                # Mark completed
-                await concurrency_manager.append_log(job_id, f"Successfully imported '{show.title}' with {total_eps} episodes.", 100.0)
-                res_j2 = await db.execute(select(Job).where(Job.id == job_id))
-                db_job2 = res_j2.scalars().first()
-                if db_job2:
-                    db_job2.status = "COMPLETED"
-                    db_job2.finished_at = datetime.utcnow()
-                await db.commit()
+                if scan_mode == "full":
+                    await concurrency_manager.append_log(
+                        job_id,
+                        f"Roster saved ({total_eps} episodes). Proceeding to AI Subtitle & Metadata Verification...",
+                        40.0
+                    )
+                    await VerificationEngine.execute_show_verification_steps(show.id, job_id)
+                else:
+                    # Mark completed
+                    await concurrency_manager.append_log(job_id, f"Successfully imported '{show.title}' with {total_eps} episodes.", 100.0)
+                    res_j2 = await db.execute(select(Job).where(Job.id == job_id))
+                    db_job2 = res_j2.scalars().first()
+                    if db_job2:
+                        db_job2.status = "COMPLETED"
+                        db_job2.finished_at = datetime.utcnow()
+                    await db.commit()
 
         except asyncio.CancelledError:
             await concurrency_manager.append_log(job_id, "Job execution cancelled.")
@@ -416,4 +425,41 @@ async def import_shows_batch(
         "job_ids": job_ids,
         "count": len(job_ids),
         "message": f"Queued batch import for {len(job_ids)} shows successfully"
+    }
+
+
+@router.post("/{show_id}/audit")
+async def audit_show(
+    show_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    stmt = select(Show).where(Show.id == show_id)
+    res = await db.execute(stmt)
+    show = res.scalars().first()
+    if not show:
+        raise HTTPException(status_code=404, detail="Show not found")
+
+    job = Job(
+        show_id=show.id,
+        job_type="AUDIT_SHOW",
+        status="PENDING",
+        progress=0.0,
+        message=f"Queued AI audit for '{show.title}'",
+        payload=json.dumps({"show_id": show.id}),
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    background_tasks.add_task(
+        VerificationEngine.run_show_verification,
+        show_id=show.id,
+        job_id=job.id
+    )
+
+    return {
+        "success": True,
+        "job_id": job.id,
+        "message": f"AI audit queued for '{show.title}'"
     }
