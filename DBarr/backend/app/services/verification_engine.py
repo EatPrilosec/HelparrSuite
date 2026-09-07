@@ -135,6 +135,14 @@ class VerificationEngine:
             # Provider keys
             opensubs_key = cfg.get("opensubtitles_api_key", "")
             opensubs_ua = cfg.get("opensubtitles_user_agent", "DBarr v0.1")
+            opensubs_user = cfg.get("opensubtitles_username", "")
+            opensubs_pass = cfg.get("opensubtitles_password", "")
+            opensubs_token = None
+            if opensubs_user and opensubs_pass and opensubs_key:
+                try:
+                    opensubs_token = await OpenSubtitlesClient.get_token(opensubs_key, opensubs_ua, opensubs_user, opensubs_pass)
+                except Exception as e:
+                    logger.warning(f"OpenSubtitles login token fetch failed: {e}")
             subdl_key = cfg.get("subdl_api_key", "")
             tmdb_key = cfg.get("tmdb_api_key", "")
             omdb_key = cfg.get("omdb_api_key", "")
@@ -298,30 +306,37 @@ class VerificationEngine:
                         candidate_subs: List[Dict[str, Any]] = []
                         provider_used = "opensubtitles"
                         raw_sub_text = None
+                        provider_error = None
 
                         if opensubs_key:
                             try:
                                 candidate_subs = await OpenSubtitlesClient.search_subtitles(
                                     api_key=opensubs_key,
                                     user_agent=opensubs_ua,
-                                    imdb_id=show_imdb_id,
-                                    tmdb_id=show_tmdb_id,
+                                    parent_imdb_id=show_imdb_id,
+                                    parent_tmdb_id=show_tmdb_id,
+                                    query=show_title,
                                     season_number=s_num,
                                     episode_number=e_num,
-                                    languages=lang_code
+                                    languages=lang_code,
+                                    token=opensubs_token
                                 )
                                 if candidate_subs:
                                     first_sub = candidate_subs[0]
                                     files = first_sub.get("attributes", {}).get("files", [])
                                     file_id = files[0].get("file_id") if files else None
                                     if file_id:
-                                        raw_sub_text = await OpenSubtitlesClient.download_subtitle_file(
+                                        raw_sub_text, os_err = await OpenSubtitlesClient.download_subtitle_file(
                                             api_key=opensubs_key,
                                             file_id=file_id,
-                                            user_agent=opensubs_ua
+                                            user_agent=opensubs_ua,
+                                            token=opensubs_token
                                         )
+                                        if os_err:
+                                            provider_error = os_err
                             except Exception as e:
                                 logger.warning(f"OpenSubtitles search/download failed for {ep_label}: {e}")
+                                provider_error = f"OpenSubtitles error: {str(e)}"
 
                         if not raw_sub_text and subdl_key:
                             try:
@@ -329,6 +344,7 @@ class VerificationEngine:
                                     api_key=subdl_key,
                                     imdb_id=show_imdb_id,
                                     tmdb_id=show_tmdb_id,
+                                    film_name=show_title,
                                     season_number=s_num,
                                     episode_number=e_num,
                                     languages=lang_code
@@ -337,11 +353,15 @@ class VerificationEngine:
                                     first_sub = subdl_subs[0]
                                     sub_url = first_sub.get("url") or first_sub.get("download_link")
                                     if sub_url:
-                                        raw_sub_text = await SubDLClient.download_subtitle_content(sub_url)
+                                        raw_sub_text, subdl_err = await SubDLClient.download_subtitle_content(sub_url)
                                         if raw_sub_text:
                                             provider_used = "subdl"
+                                        elif subdl_err:
+                                            provider_error = subdl_err
                             except Exception as e:
                                 logger.warning(f"SubDL fallback failed for {ep_label}: {e}")
+                                if not provider_error:
+                                    provider_error = f"SubDL error: {str(e)}"
 
                         if raw_sub_text:
                             clean_text, preview = TranscriptService.clean_subtitle_text(raw_sub_text)
@@ -399,10 +419,11 @@ Respond with JSON schema:
 
                         if not transcript_preview:
                             transcript_preview = f"{ep.title}. {ep.overview or ''}"
-                            audit_trail.append("Internet transcript unavailable (quota/missing); baseline plot used")
+                            reason = provider_error or "transcript missing on internet providers"
+                            audit_trail.append(f"Internet transcript unavailable ({reason}); baseline plot used")
                             await concurrency_manager.append_log(
                                 job_id,
-                                f"  -> [Pass 1] Internet subtitle transcript unavailable for {ep_label}; using Sonarr baseline plot"
+                                f"  -> [Pass 1] Internet subtitle transcript unavailable for {ep_label} ({reason}); using Sonarr baseline plot"
                             )
 
                     if concurrency_manager.is_cancelled(job_id):

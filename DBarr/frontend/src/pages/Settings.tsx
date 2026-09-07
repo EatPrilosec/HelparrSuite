@@ -17,6 +17,8 @@ export const Settings: React.FC = () => {
     subdl_api_key: '',
     opensubtitles_api_key: '',
     opensubtitles_user_agent: 'DBarr v0.1',
+    opensubtitles_username: '',
+    opensubtitles_password: '',
     max_concurrent_jobs: 1,
     max_concurrent_ollama_requests: 1,
     default_language: 'en',
@@ -570,35 +572,79 @@ export const Settings: React.FC = () => {
             )}
 
             {/* OpenSubtitles */}
-            <div className="p-4 rounded-xl bg-dark-900/60 border border-dark-700 flex flex-col md:flex-row md:items-center justify-between gap-3">
-              <div className="flex-1">
-                <div className="flex items-center space-x-2 mb-1">
+            <div className="p-4 rounded-xl bg-dark-900/60 border border-dark-700 space-y-3">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div className="flex items-center space-x-2">
                   <span className="text-xs font-bold text-white">OpenSubtitles.com</span>
                   <span className="text-[10px] text-slate-500 font-mono">REST v1</span>
                 </div>
-                <input
-                  type="password"
-                  value={settings.opensubtitles_api_key}
-                  onChange={e => setSettings({ ...settings, opensubtitles_api_key: e.target.value })}
-                  placeholder="OpenSubtitles API Key"
-                  className="w-full px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-white text-xs font-mono focus:outline-none focus:border-indigo-500"
-                />
+                <button
+                  type="button"
+                  onClick={() => handleTestConnection('opensubtitles')}
+                  disabled={testingService === 'opensubtitles'}
+                  className="self-start md:self-end px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 text-slate-300 text-xs font-medium border border-dark-600 flex items-center space-x-1.5"
+                >
+                  {testingService === 'opensubtitles' && <Loader2 className="w-3 h-3 animate-spin" />}
+                  <span>Test OpenSubtitles</span>
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => handleTestConnection('opensubtitles')}
-                disabled={testingService === 'opensubtitles'}
-                className="self-start md:self-end px-3 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 text-slate-300 text-xs font-medium border border-dark-600 flex items-center space-x-1.5"
-              >
-                {testingService === 'opensubtitles' && <Loader2 className="w-3 h-3 animate-spin" />}
-                <span>Test OpenSubtitles</span>
-              </button>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] text-slate-400 font-medium block mb-1">Consumer API Key</label>
+                  <input
+                    type="password"
+                    value={settings.opensubtitles_api_key}
+                    onChange={e => setSettings({ ...settings, opensubtitles_api_key: e.target.value })}
+                    placeholder="OpenSubtitles API Key"
+                    className="w-full px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-white text-xs font-mono focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] text-slate-400 font-medium block mb-1">User-Agent</label>
+                  <input
+                    type="text"
+                    value={settings.opensubtitles_user_agent}
+                    onChange={e => setSettings({ ...settings, opensubtitles_user_agent: e.target.value })}
+                    placeholder="DBarr v0.1"
+                    className="w-full px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-white text-xs font-mono focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-dark-700/50">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[11px] font-semibold text-slate-300">OpenSubtitles Account Login (Optional)</span>
+                  <span className="text-[10px] text-slate-500">Unlocks 20/day (Free) or 1,000/day (VIP)</span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <input
+                      type="text"
+                      value={settings.opensubtitles_username || ''}
+                      onChange={e => setSettings({ ...settings, opensubtitles_username: e.target.value })}
+                      placeholder="Username / Email"
+                      className="w-full px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-white text-xs font-mono focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <input
+                      type="password"
+                      value={settings.opensubtitles_password || ''}
+                      onChange={e => setSettings({ ...settings, opensubtitles_password: e.target.value })}
+                      placeholder="Password"
+                      className="w-full px-3 py-1.5 rounded-lg bg-dark-800 border border-dark-600 text-white text-xs font-mono focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {testResults.opensubtitles && (
+                <p className={`text-xs mt-2 ${testResults.opensubtitles.success ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {testResults.opensubtitles.message}
+                </p>
+              )}
             </div>
-            {testResults.opensubtitles && (
-              <p className={`text-xs ${testResults.opensubtitles.success ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {testResults.opensubtitles.message}
-              </p>
-            )}
           </div>
         </div>
       </form>

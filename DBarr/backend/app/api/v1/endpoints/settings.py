@@ -37,8 +37,6 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
     max_jobs = int(data.get("max_concurrent_jobs", 1)) if str(data.get("max_concurrent_jobs", "")).isdigit() else 1
     max_ollama = int(data.get("max_concurrent_ollama_requests", 1)) if str(data.get("max_concurrent_ollama_requests", "")).isdigit() else 1
 
-    concurrency_manager.update_limits(max_jobs, max_ollama)
-
     # Parse fallback models
     fallback_models: List[str] = []
     raw_fallbacks = data.get("ollama_fallback_models")
@@ -72,6 +70,8 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
         subdl_api_key=data.get("subdl_api_key", ""),
         opensubtitles_api_key=data.get("opensubtitles_api_key", ""),
         opensubtitles_user_agent=data.get("opensubtitles_user_agent", "DBarr v0.1"),
+        opensubtitles_username=data.get("opensubtitles_username", ""),
+        opensubtitles_password=data.get("opensubtitles_password", ""),
         max_concurrent_jobs=max_jobs,
         max_concurrent_ollama_requests=max_ollama,
         default_language=data.get("default_language", "en")
@@ -98,6 +98,7 @@ async def update_settings(payload: Union[AppSettings, SettingUpdate, Dict[str, A
         "omdb_api_key",
         "subdl_api_key",
         "opensubtitles_api_key",
+        "opensubtitles_password",
         "sonarr_url",
     }
 
@@ -180,6 +181,8 @@ async def update_settings(payload: Union[AppSettings, SettingUpdate, Dict[str, A
         subdl_api_key=merged.get("subdl_api_key", ""),
         opensubtitles_api_key=merged.get("opensubtitles_api_key", ""),
         opensubtitles_user_agent=merged.get("opensubtitles_user_agent", "DBarr v0.1"),
+        opensubtitles_username=merged.get("opensubtitles_username", ""),
+        opensubtitles_password=merged.get("opensubtitles_password", ""),
         max_concurrent_jobs=max(1, max_jobs),
         max_concurrent_ollama_requests=max(1, max_ollama),
         default_language=merged.get("default_language", "en"),
@@ -200,6 +203,8 @@ async def test_connection(req: ConnectionTestRequest, db: AsyncSession = Depends
             "url": req.url,
             "api_key": req.api_key,
             "user_agent": req.user_agent,
+            "username": req.username,
+            "password": req.password,
             "model": req.model,
             "ollama_url": req.url,
             "sonarr_url": req.url,
@@ -209,6 +214,8 @@ async def test_connection(req: ConnectionTestRequest, db: AsyncSession = Depends
             "subdl_api_key": req.api_key,
             "opensubtitles_api_key": req.api_key,
             "opensubtitles_user_agent": req.user_agent,
+            "opensubtitles_username": req.username,
+            "opensubtitles_password": req.password,
         }
 
     # Fallback to saved DB values if fields are empty
@@ -281,11 +288,14 @@ async def test_connection(req: ConnectionTestRequest, db: AsyncSession = Depends
     elif svc == "opensubtitles":
         key = cfg.get("opensubtitles_api_key") or cfg.get("api_key") or records.get("opensubtitles_api_key", "")
         ua = cfg.get("opensubtitles_user_agent") or cfg.get("user_agent") or records.get("opensubtitles_user_agent", "DBarr v0.1")
-        res = await OpenSubtitlesClient.test_connection(key, ua)
+        user = cfg.get("opensubtitles_username") or cfg.get("username") or records.get("opensubtitles_username", "")
+        pwd = cfg.get("opensubtitles_password") or cfg.get("password") or records.get("opensubtitles_password", "")
+        res = await OpenSubtitlesClient.test_connection(key, ua, user, pwd)
         return ConnectionTestResponse(
             service="opensubtitles",
             success=res.get("success", False),
-            message=res.get("message", "")
+            message=res.get("message", ""),
+            details=res.get("details")
         )
 
     else:

@@ -22,6 +22,8 @@ class AppSettings(BaseModel):
     subdl_api_key: str = ""
     opensubtitles_api_key: str = ""
     opensubtitles_user_agent: str = "DBarr v0.1"
+    opensubtitles_username: str = ""
+    opensubtitles_password: str = ""
 
     # Concurrency & Resource Limits (defaults all 1)
     max_concurrent_jobs: int = 1
@@ -41,6 +43,8 @@ class ConnectionTestRequest(BaseModel):
     url: Optional[str] = None
     api_key: Optional[str] = None
     user_agent: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
     model: Optional[str] = None
 
 

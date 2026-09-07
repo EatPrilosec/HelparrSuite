@@ -140,6 +140,8 @@ export interface AppSettings {
   subdl_api_key: string;
   opensubtitles_api_key: string;
   opensubtitles_user_agent: string;
+  opensubtitles_username?: string;
+  opensubtitles_password?: string;
   max_concurrent_jobs: number;
   max_concurrent_ollama_requests: number;
   default_language: string;
