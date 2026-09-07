@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +54,12 @@ def resolve_language_code(lang: Optional[str]) -> str:
     if len(clean) == 2:
         return clean
     return LANGUAGE_CODE_MAP.get(clean, "en")
+
+
+def clean_html_summary(html: Optional[str]) -> str:
+    if not html:
+        return ""
+    return re.sub(r"<[^>]+>", "", html).strip()
 
 
 class VerificationEngine:
@@ -212,6 +219,19 @@ class VerificationEngine:
             sorted_episodes = sorted(show.episodes, key=ep_sort)
             total_eps = len(sorted_episodes)
 
+            # Track already-claimed external IDs to ensure strict 1-to-1 uniqueness across episodes
+            claimed_tmdb_ids = set()
+            claimed_tvm_ids = set()
+            claimed_omdb_ids = set()
+            for ep_existing in show.episodes:
+                for v in ep_existing.source_variations:
+                    if v.source_name == "tmdb" and v.source_episode_id:
+                        claimed_tmdb_ids.add(str(v.source_episode_id))
+                    elif v.source_name == "tvmaze" and v.source_episode_id:
+                        claimed_tvm_ids.add(str(v.source_episode_id))
+                    elif v.source_name == "omdb" and v.source_episode_id:
+                        claimed_omdb_ids.add(str(v.source_episode_id))
+
             # Iterate over episodes
             for idx, ep in enumerate(sorted_episodes, start=1):
                 if concurrency_manager.is_cancelled(job_id):
@@ -231,10 +251,10 @@ class VerificationEngine:
 
                 audit_trail: List[str] = []
 
-                # Skip if already fully verified
+                # Skip if already fully verified with both primary metadata providers
                 has_tmdb = any(v.source_name == "tmdb" for v in ep.source_variations)
                 has_tvm = any(v.source_name == "tvmaze" for v in ep.source_variations)
-                if ep.ai_verification_status == "AI_MATCHED" and (has_tmdb or has_tvm):
+                if ep.ai_verification_status == "AI_MATCHED" and (has_tmdb and has_tvm):
                     await concurrency_manager.append_log(
                         job_id,
                         f"[{idx}/{total_eps}] {ep_label} is already verified (AI_MATCHED). Skipping.",
@@ -377,15 +397,18 @@ Respond with JSON schema:
                             tmdb_season_cache[s_num] = []
 
                     candidates = tmdb_season_cache.get(s_num, [])
-                    if candidates:
+                    avail_candidates = [c for c in candidates if str(c.get("id")) not in claimed_tmdb_ids]
+                    target_candidates = avail_candidates if avail_candidates else candidates
+
+                    if target_candidates:
                         cand_summaries = []
-                        for c in candidates:
+                        for c in target_candidates:
                             cand_summaries.append({
                                 "tmdb_episode_id": c.get("id"),
                                 "season_number": c.get("season_number"),
                                 "episode_number": c.get("episode_number"),
                                 "name": c.get("name"),
-                                "overview": c.get("overview", "")[:150],
+                                "overview": c.get("overview", "")[:200],
                                 "air_date": c.get("air_date")
                             })
 
@@ -398,7 +421,12 @@ Respond with JSON schema:
 - Verified Native Dialogue Transcript Excerpt: "{transcript_preview[:300]}"
 
 Candidate Episodes from TMDB (Season {s_num}):
-{json.dumps(cand_summaries[:15], indent=2)}
+{json.dumps(cand_summaries[:20], indent=2)}
+
+Match Priority Instructions:
+1. TITLE & SEMANTIC VARIATIONS (Highest Priority): Match based on identical or closely matching titles, alternate titles, or translated titles.
+2. NARRATIVE PLOT & STORY CONTENT: Confirm that the premise, characters, and events described in the candidate overview match the baseline episode.
+3. AIR DATE & EPISODE NUMBER (Lowest Priority / Tiebreaker Only): Broadcast dates and episode numbers routinely diverge across syndication, streaming, and regional release orders. NEVER match solely on episode number or broadcast date if the title or narrative premise describes a completely different episode.
 
 Identify the exact matching TMDB episode. 
 Respond ONLY in JSON format:
@@ -406,7 +434,7 @@ Respond ONLY in JSON format:
   "matched": true,
   "tmdb_episode_id": 12345,
   "confidence": 1.0,
-  "reasoning": "Why this TMDB episode matches",
+  "reasoning": "Why this TMDB episode matches based on title and narrative",
   "alternate_titles": ["Alt title"]
 }}"""
                             try:
@@ -421,12 +449,12 @@ Respond ONLY in JSON format:
                                 )
                                 p2_data = llm_p2.get("data", {})
                                 matched_c_id = p2_data.get("tmdb_episode_id")
-                                matched_c = next((c for c in candidates if c.get("id") == matched_c_id), None)
+                                matched_c = next((c for c in target_candidates if c.get("id") == matched_c_id), None)
                                 if not matched_c and candidates:
-                                    # Fallback to episode number match if high title similarity
-                                    matched_c = next((c for c in candidates if c.get("episode_number") == e_num), None)
+                                    matched_c = next((c for c in candidates if c.get("id") == matched_c_id), None)
 
-                                if matched_c:
+                                if matched_c and p2_data.get("matched", True):
+                                    claimed_tmdb_ids.add(str(matched_c.get("id")))
                                     tmdb_var = EpisodeSourceMetadata(
                                         episode_id=ep.id,
                                         show_id=show.id,
@@ -460,14 +488,18 @@ Respond ONLY in JSON format:
                         c for c in tvmaze_episodes_cache
                         if (c.get("season") == s_num) or (s_num == 0 and c.get("season") == 0)
                     ]
-                    if tvm_candidates:
+                    avail_tvm = [c for c in tvm_candidates if str(c.get("id")) not in claimed_tvm_ids]
+                    target_tvm = avail_tvm if avail_tvm else tvm_candidates
+
+                    if target_tvm:
                         cand_list = []
-                        for c in tvm_candidates:
+                        for c in target_tvm:
                             cand_list.append({
                                 "tvmaze_id": c.get("id"),
                                 "season": c.get("season"),
                                 "number": c.get("number"),
                                 "name": c.get("name"),
+                                "overview": clean_html_summary(c.get("summary"))[:200],
                                 "airdate": c.get("airdate")
                             })
 
@@ -480,7 +512,12 @@ Respond ONLY in JSON format:
 - Verified Dialogue Transcript Excerpt: "{transcript_preview[:250]}"
 
 Candidate TVmaze Linear Broadcast Episodes:
-{json.dumps(cand_list[:15], indent=2)}
+{json.dumps(cand_list[:20], indent=2)}
+
+Match Priority Instructions:
+1. TITLE & SEMANTIC VARIATIONS (Highest Priority): Match based on identical or closely matching titles, alternate titles, or translated titles.
+2. NARRATIVE PLOT & STORY CONTENT: Confirm that the premise, characters, and events described in the candidate overview match the baseline episode.
+3. AIR DATE & EPISODE NUMBER (Lowest Priority / Tiebreaker Only): Broadcast dates and episode numbers routinely diverge across regional syndication, streaming releases, production orders, and network re-runs. NEVER match solely on episode number or broadcast date if the title or narrative premise describes a completely different episode.
 
 Select the matching TVmaze broadcast episode.
 Respond ONLY in JSON:
@@ -488,7 +525,7 @@ Respond ONLY in JSON:
   "matched": true,
   "tvmaze_id": 12345,
   "confidence": 1.0,
-  "reasoning": "Reason for broadcast order match"
+  "reasoning": "Reason for match based on title and narrative plot"
 }}"""
                             try:
                                 llm_p3 = await OllamaClient.query_with_fallback_json(
@@ -502,11 +539,12 @@ Respond ONLY in JSON:
                                 )
                                 p3_data = llm_p3.get("data", {})
                                 matched_tvm_id = p3_data.get("tvmaze_id")
-                                matched_tvm = next((c for c in tvm_candidates if c.get("id") == matched_tvm_id), None)
+                                matched_tvm = next((c for c in target_tvm if c.get("id") == matched_tvm_id), None)
                                 if not matched_tvm and tvm_candidates:
-                                    matched_tvm = next((c for c in tvm_candidates if c.get("number") == e_num), None)
+                                    matched_tvm = next((c for c in tvm_candidates if c.get("id") == matched_tvm_id), None)
 
-                                if matched_tvm:
+                                if matched_tvm and p3_data.get("matched", True):
+                                    claimed_tvm_ids.add(str(matched_tvm.get("id")))
                                     tvm_var = EpisodeSourceMetadata(
                                         episode_id=ep.id,
                                         show_id=show.id,
@@ -520,7 +558,7 @@ Respond ONLY in JSON:
                                         air_date=matched_tvm.get("airdate"),
                                         match_method="LLM_LINEAR_BROADCAST_CONFIRMED",
                                         match_confidence=float(p3_data.get("confidence", 1.0)),
-                                        llm_reasoning=p3_data.get("reasoning", "TVmaze linear match confirmed"),
+                                        llm_reasoning=p3_data.get("reasoning", "TVmaze match confirmed based on title and plot"),
                                         raw_metadata=json.dumps(matched_tvm)
                                     )
                                     db.add(tvm_var)
@@ -542,9 +580,12 @@ Respond ONLY in JSON:
                             omdb_season_cache[s_num] = []
 
                     omdb_candidates = omdb_season_cache.get(s_num, [])
-                    if omdb_candidates:
+                    avail_omdb = [c for c in omdb_candidates if str(c.get("imdbID")) not in claimed_omdb_ids]
+                    target_omdb = avail_omdb if avail_omdb else omdb_candidates
+
+                    if target_omdb:
                         cand_list = []
-                        for c in omdb_candidates:
+                        for c in target_omdb:
                             cand_list.append({
                                 "imdb_id": c.get("imdbID"),
                                 "episode": c.get("Episode"),
@@ -562,7 +603,12 @@ Respond ONLY in JSON:
 - Verified Dialogue Transcript Excerpt: "{transcript_preview[:250]}"
 
 Candidate OMDb/IMDb Entries (Season {s_num}):
-{json.dumps(cand_list[:15], indent=2)}
+{json.dumps(cand_list[:20], indent=2)}
+
+Match Priority Instructions:
+1. TITLE & SEMANTIC VARIATIONS (Highest Priority): Match based on identical or closely matching titles.
+2. NARRATIVE PLOT & STORY CONTENT: Confirm that the premise and events match the baseline episode.
+3. AIR DATE & EPISODE NUMBER (Lowest Priority / Tiebreaker Only): Broadcast dates and numbering can diverge. NEVER match solely on episode number or date if the title describes a completely different episode.
 
 Confirm the matching IMDb episode entry.
 Respond ONLY in JSON:
@@ -570,7 +616,7 @@ Respond ONLY in JSON:
   "matched": true,
   "imdb_id": "tt1234567",
   "confidence": 1.0,
-  "reasoning": "Why this IMDb entry matches"
+  "reasoning": "Why this IMDb entry matches based on title"
 }}"""
                             try:
                                 llm_p4 = await OllamaClient.query_with_fallback_json(
@@ -584,11 +630,12 @@ Respond ONLY in JSON:
                                 )
                                 p4_data = llm_p4.get("data", {})
                                 matched_imdb_id = p4_data.get("imdb_id")
-                                matched_omdb = next((c for c in omdb_candidates if c.get("imdbID") == matched_imdb_id), None)
+                                matched_omdb = next((c for c in target_omdb if c.get("imdbID") == matched_imdb_id), None)
                                 if not matched_omdb and omdb_candidates:
-                                    matched_omdb = next((c for c in omdb_candidates if str(c.get("Episode")) == str(e_num)), None)
+                                    matched_omdb = next((c for c in omdb_candidates if c.get("imdbID") == matched_imdb_id), None)
 
-                                if matched_omdb:
+                                if matched_omdb and p4_data.get("matched", True):
+                                    claimed_omdb_ids.add(str(matched_omdb.get("imdbID")))
                                     omdb_var = EpisodeSourceMetadata(
                                         episode_id=ep.id,
                                         show_id=show.id,
@@ -601,7 +648,7 @@ Respond ONLY in JSON:
                                         air_date=matched_omdb.get("Released"),
                                         match_method="LLM_METADATA_CONFIRMED",
                                         match_confidence=float(p4_data.get("confidence", 1.0)),
-                                        llm_reasoning=p4_data.get("reasoning", "OMDb match confirmed"),
+                                        llm_reasoning=p4_data.get("reasoning", "OMDb match confirmed based on title"),
                                         raw_metadata=json.dumps(matched_omdb)
                                     )
                                     db.add(omdb_var)
