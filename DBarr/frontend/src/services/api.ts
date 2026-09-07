@@ -88,6 +88,19 @@ export const api = {
     return res.json();
   },
 
+  async clearJobs(status?: string): Promise<{ success: boolean; count: number; message: string }> {
+    const params = status ? `?status=${encodeURIComponent(status)}` : '';
+    const res = await fetch(`${API_BASE}/jobs/clear${params}`, { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to clear jobs');
+    return res.json();
+  },
+
+  async deleteJob(id: number): Promise<{ success: boolean; message: string }> {
+    const res = await fetch(`${API_BASE}/jobs/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('Failed to delete job');
+    return res.json();
+  },
+
   // Settings
   async getSettings(): Promise<AppSettings> {
     const res = await fetch(`${API_BASE}/settings`);
@@ -95,11 +108,11 @@ export const api = {
     return res.json();
   },
 
-  async updateSettings(settings: Partial<AppSettings>): Promise<{ success: boolean; message: string }> {
+  async updateSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
     const res = await fetch(`${API_BASE}/settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings }),
+      body: JSON.stringify(settings),
     });
     if (!res.ok) throw new Error('Failed to update settings');
     return res.json();

@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Union
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -81,36 +81,117 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("", response_model=AppSettings)
-async def update_settings(payload: AppSettings, db: AsyncSession = Depends(get_db)):
-    # Validate fallback models (never 0)
-    clean_fallbacks = [m.strip() for m in payload.ollama_fallback_models if m and m.strip()]
+async def update_settings(payload: Union[AppSettings, SettingUpdate, Dict[str, Any]], db: AsyncSession = Depends(get_db)):
+    if isinstance(payload, SettingUpdate):
+        raw_dict = payload.settings
+    elif isinstance(payload, dict):
+        raw_dict = payload.get("settings") if isinstance(payload.get("settings"), dict) else payload
+    elif hasattr(payload, "model_dump"):
+        raw_dict = payload.model_dump()
+        if "settings" in raw_dict and isinstance(raw_dict["settings"], dict):
+            raw_dict = raw_dict["settings"]
+    else:
+        raw_dict = {}
+
+    PROTECTED_KEYS = {
+        "sonarr_api_key",
+        "tmdb_api_key",
+        "tvmaze_api_key",
+        "omdb_api_key",
+        "subdl_api_key",
+        "opensubtitles_api_key",
+        "sonarr_url",
+    }
+
+    # Fetch existing DB settings as baseline
+    stmt = select(Setting)
+    res = await db.execute(stmt)
+    records = res.scalars().all()
+    merged = {r.key: r.value for r in records}
+
+    # Merge file and env config for baseline
+    file_cfg = read_config_file()
+    env_cfg = get_env_overrides()
+    for k, v in {**file_cfg, **env_cfg}.items():
+        if not merged.get(k) and v is not None and str(v).strip():
+            merged[k] = json.dumps(v) if isinstance(v, (list, dict)) else str(v)
+
+    # Apply incoming updates
+    for k, v in raw_dict.items():
+        if v is None:
+            continue
+        val_str = json.dumps(v) if isinstance(v, (list, dict)) else str(v)
+        # If incoming value is empty/blank for a protected key, do NOT overwrite existing non-empty value
+        if k in PROTECTED_KEYS and not val_str.strip():
+            if merged.get(k) and str(merged[k]).strip():
+                continue
+        merged[k] = val_str
+
+    # Process and clean fallback models
+    clean_fallbacks: List[str] = []
+    raw_fallbacks = merged.get("ollama_fallback_models")
+    if raw_fallbacks:
+        try:
+            parsed = json.loads(raw_fallbacks) if isinstance(raw_fallbacks, str) else raw_fallbacks
+            if isinstance(parsed, list):
+                clean_fallbacks = [str(m).strip() for m in parsed if str(m).strip()]
+        except Exception:
+            if isinstance(raw_fallbacks, str):
+                clean_fallbacks = [m.strip() for m in raw_fallbacks.split(",") if m.strip()]
+
+    if not clean_fallbacks and merged.get("ollama_fallback_model"):
+        clean_fallbacks = [str(merged["ollama_fallback_model"]).strip()]
+
     if not clean_fallbacks:
         clean_fallbacks = ["Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M"]
 
-    payload.ollama_fallback_models = clean_fallbacks
-    payload.ollama_fallback_model = clean_fallbacks[0]
-    payload.ai_batch_size = max(1, payload.ai_batch_size)
-    payload.max_concurrent_jobs = max(1, payload.max_concurrent_jobs)
-    payload.max_concurrent_ollama_requests = max(1, payload.max_concurrent_ollama_requests)
+    merged["ollama_fallback_models"] = json.dumps(clean_fallbacks)
+    merged["ollama_fallback_model"] = clean_fallbacks[0]
 
-    settings_dict = payload.model_dump()
-    for k, v in settings_dict.items():
-        val_str = json.dumps(v) if isinstance(v, (list, dict)) else str(v)
-        stmt = select(Setting).where(Setting.key == k)
-        res = await db.execute(stmt)
-        record = res.scalars().first()
+    # Process concurrency and batch limits
+    max_jobs = int(merged.get("max_concurrent_jobs", 1)) if str(merged.get("max_concurrent_jobs", "")).isdigit() else 1
+    max_ollama = int(merged.get("max_concurrent_ollama_requests", 1)) if str(merged.get("max_concurrent_ollama_requests", "")).isdigit() else 1
+    batch_size = int(merged.get("ai_batch_size", 1)) if str(merged.get("ai_batch_size", "")).isdigit() else 1
+
+    merged["max_concurrent_jobs"] = str(max(1, max_jobs))
+    merged["max_concurrent_ollama_requests"] = str(max(1, max_ollama))
+    merged["ai_batch_size"] = str(max(1, batch_size))
+
+    # Persist all merged settings to DB
+    for k, val_str in merged.items():
+        stmt_item = select(Setting).where(Setting.key == k)
+        res_item = await db.execute(stmt_item)
+        record = res_item.scalars().first()
         if record:
             record.value = val_str
         else:
             db.add(Setting(key=k, value=val_str))
 
     await db.commit()
-    concurrency_manager.update_limits(payload.max_concurrent_jobs, payload.max_concurrent_ollama_requests)
+    concurrency_manager.update_limits(max(1, max_jobs), max(1, max_ollama))
 
-    # Persist to /config/config.json
-    write_config_file(settings_dict)
+    # Build response object and write clean JSON to file
+    response_settings = AppSettings(
+        ollama_url=merged.get("ollama_url", "http://localhost:11434"),
+        ollama_primary_model=merged.get("ollama_primary_model", "gemma4:e2b"),
+        ollama_fallback_models=clean_fallbacks,
+        ollama_fallback_model=clean_fallbacks[0],
+        ai_batch_size=max(1, batch_size),
+        sonarr_url=merged.get("sonarr_url", ""),
+        sonarr_api_key=merged.get("sonarr_api_key", ""),
+        tmdb_api_key=merged.get("tmdb_api_key", ""),
+        tvmaze_api_key=merged.get("tvmaze_api_key", ""),
+        omdb_api_key=merged.get("omdb_api_key", ""),
+        subdl_api_key=merged.get("subdl_api_key", ""),
+        opensubtitles_api_key=merged.get("opensubtitles_api_key", ""),
+        opensubtitles_user_agent=merged.get("opensubtitles_user_agent", "DBarr v0.1"),
+        max_concurrent_jobs=max(1, max_jobs),
+        max_concurrent_ollama_requests=max(1, max_ollama),
+        default_language=merged.get("default_language", "en"),
+    )
 
-    return payload
+    write_config_file(response_settings.model_dump())
+    return response_settings
 
 
 @router.post("/test-connection", response_model=ConnectionTestResponse)
