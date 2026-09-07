@@ -22,6 +22,7 @@ from backend.app.schemas.show import (
 )
 from backend.app.services.sonarr_client import SonarrClient
 from backend.app.services.concurrency_manager import concurrency_manager
+from backend.app.core.config_manager import read_config_file, get_env_overrides
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/shows", tags=["shows"])
@@ -108,6 +109,12 @@ async def lookup_sonarr_shows(db: AsyncSession = Depends(get_db)):
     stmt = select(Setting)
     res = await db.execute(stmt)
     records = {r.key: r.value for r in res.scalars().all()}
+    file_cfg = read_config_file()
+    env_cfg = get_env_overrides()
+    for k, v in {**file_cfg, **env_cfg}.items():
+        if not records.get(k) and v is not None and str(v).strip():
+            records[k] = str(v)
+
     sonarr_url = records.get("sonarr_url", "http://localhost:8989")
     sonarr_api_key = records.get("sonarr_api_key", "")
 
@@ -164,6 +171,12 @@ async def run_import_pipeline(sonarr_series_id: int, job_id: int, scan_mode: str
                 stmt_set = select(Setting)
                 res_set = await db.execute(stmt_set)
                 settings_map = {r.key: r.value for r in res_set.scalars().all()}
+                file_cfg = read_config_file()
+                env_cfg = get_env_overrides()
+                for k, v in {**file_cfg, **env_cfg}.items():
+                    if not settings_map.get(k) and v is not None and str(v).strip():
+                        settings_map[k] = str(v)
+
                 sonarr_url = settings_map.get("sonarr_url", "http://localhost:8989")
                 sonarr_api_key = settings_map.get("sonarr_api_key", "")
 

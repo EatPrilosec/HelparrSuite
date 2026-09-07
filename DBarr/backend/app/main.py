@@ -13,18 +13,22 @@ from backend.app.models.setting import Setting
 from backend.app.services.concurrency_manager import concurrency_manager
 
 
+from backend.app.core.config_manager import sync_config_on_startup
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize SQLite database schema
     await init_db()
 
-    # Sync concurrency limits from saved settings
+    # Sync persistent config.json, environment variables, and SQLite settings
     async with AsyncSessionLocal() as db:
         try:
+            await sync_config_on_startup(db)
             stmt = select(Setting)
             res = await db.execute(stmt)
             data = {r.key: r.value for r in res.scalars().all()}
-            max_jobs = int(data.get("max_concurrent_jobs", 2)) if str(data.get("max_concurrent_jobs", "")).isdigit() else 2
+            max_jobs = int(data.get("max_concurrent_jobs", 1)) if str(data.get("max_concurrent_jobs", "")).isdigit() else 1
             max_ollama = int(data.get("max_concurrent_ollama_requests", 1)) if str(data.get("max_concurrent_ollama_requests", "")).isdigit() else 1
             concurrency_manager.update_limits(max_jobs, max_ollama)
         except Exception:
