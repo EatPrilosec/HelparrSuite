@@ -1,0 +1,16 @@
+services:
+  dbarr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/eatprilosec/dbarr:latest
+    container_name: dbarr
+    restart: unless-stopped
+    ports:
+      - "6781:6781"
+    environment:
+      - DBARR_PORT=6781
+      - DBARR_DATA_DIR=/config
+      - TZ=UTC
+    volumes:
+      - /DockerData/dbarr/config:/config
