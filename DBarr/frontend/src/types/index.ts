@@ -132,14 +132,24 @@ export interface AppSettings {
   ollama_primary_model: string;
   ollama_fallback_models: string[];
   ollama_fallback_model: string;
+  ai_batch_size: number;
   sonarr_url: string;
   sonarr_api_key: string;
+  tmdb_api_key: string;
+  tvmaze_api_key: string;
+  omdb_api_key: string;
+  subdl_api_key: string;
   opensubtitles_api_key: string;
   opensubtitles_user_agent: string;
-  subdl_api_key: string;
-  tmdb_api_key: string;
-  omdb_api_key: string;
   max_concurrent_jobs: number;
   max_concurrent_ollama_requests: number;
   default_language: string;
+}
+
+export interface ConnectionTestResponse {
+  service: string;
+  success: boolean;
+  message: string;
+  available_models?: string[];
+  details?: any;
 }

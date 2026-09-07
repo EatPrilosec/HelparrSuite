@@ -1,4 +1,4 @@
-import { Show, ShowBrief, SonarrShowLookup, Job, AppSettings } from '../types';
+import { Show, ShowBrief, SonarrShowLookup, Job, AppSettings, ConnectionTestResponse } from '../types';
 
 const API_BASE = '/api/v1';
 
@@ -93,11 +93,11 @@ export const api = {
     return res.json();
   },
 
-  async testConnection(payload: { service: string; url?: string; api_key?: string; user_agent?: string }): Promise<{ success: boolean; message: string; available_models?: string[]; details?: any }> {
+  async testConnection(service: string, config: any): Promise<ConnectionTestResponse> {
     const res = await fetch(`${API_BASE}/settings/test-connection`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ service, config }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Connection test failed' }));

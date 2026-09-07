@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy Backend Code
 COPY backend/ /app/backend/
+COPY pytest.ini /app/pytest.ini
 
 # Copy built frontend assets to FastAPI static directory
 COPY --from=frontend-builder /app/backend/app/static /app/backend/app/static

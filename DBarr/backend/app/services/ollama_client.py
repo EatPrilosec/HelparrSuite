@@ -1,7 +1,28 @@
 import json
+import logging
 import re
 from typing import Dict, Any, List, Optional
 import httpx
+
+logger = logging.getLogger(__name__)
+
+SAFETY_REFUSAL_INDICATORS = [
+    "i cannot fulfill",
+    "i am unable to fulfill",
+    "i cannot assist",
+    "i'm unable to assist",
+    "against my safety",
+    "violates content policy",
+    "violates safety guidelines",
+    "as an ai assistant, i cannot",
+    "as a helpful and harmless assistant",
+    "i apologize, but i cannot",
+    "i am sorry, but i cannot",
+    "i cannot generate content that",
+    "i cannot process explicit",
+    "harmful or dangerous",
+    "refuse to assist",
+]
 
 
 def clean_llm_text(content: str) -> str:
@@ -10,6 +31,13 @@ def clean_llm_text(content: str) -> str:
         return ""
     cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
     return cleaned
+
+
+def is_safety_refusal(text: str) -> bool:
+    if not text:
+        return True
+    lowered = text.lower()
+    return any(ind in lowered for ind in SAFETY_REFUSAL_INDICATORS)
 
 
 def extract_json_from_llm(content: str) -> Any:
@@ -145,3 +173,71 @@ class OllamaClient:
             data = response.json()
             raw_text = data.get("response", "")
             return extract_json_from_llm(raw_text)
+
+    @staticmethod
+    async def query_with_fallback_text(
+        base_url: str,
+        primary_model: str,
+        fallback_models: List[str],
+        user_prompt: str,
+        system_prompt: Optional[str] = None,
+        timeout: float = 60.0,
+    ) -> Dict[str, Any]:
+        models_to_try = [primary_model] + [m for m in fallback_models if m and m != primary_model]
+        last_error = None
+
+        for model in models_to_try:
+            try:
+                text = await OllamaClient.query_model_text(
+                    base_url=base_url,
+                    model=model,
+                    user_prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    timeout=timeout,
+                )
+                if is_safety_refusal(text):
+                    logger.warning(f"Model {model} triggered safety refusal/block. Falling back to next model...")
+                    last_error = f"Safety block on {model}"
+                    continue
+                return {"success": True, "text": text, "model_used": model}
+            except Exception as e:
+                logger.warning(f"Model {model} failed: {e}. Falling back to next model...")
+                last_error = str(e)
+                continue
+
+        raise RuntimeError(f"All Ollama models ({models_to_try}) failed or triggered safety blocks. Last error: {last_error}")
+
+    @staticmethod
+    async def query_with_fallback_json(
+        base_url: str,
+        primary_model: str,
+        fallback_models: List[str],
+        user_prompt: str,
+        system_prompt: Optional[str] = None,
+        timeout: float = 60.0,
+    ) -> Dict[str, Any]:
+        models_to_try = [primary_model] + [m for m in fallback_models if m and m != primary_model]
+        last_error = None
+
+        for model in models_to_try:
+            try:
+                raw_text = await OllamaClient.query_model_text(
+                    base_url=base_url,
+                    model=model,
+                    user_prompt=user_prompt + "\n\nCRITICAL: Reply ONLY with valid JSON conforming to the requested schema. Do not include markdown preamble or conversational apologies.",
+                    system_prompt=system_prompt,
+                    timeout=timeout,
+                )
+                if is_safety_refusal(raw_text):
+                    logger.warning(f"Model {model} triggered safety refusal/block. Falling back to next model...")
+                    last_error = f"Safety block on {model}"
+                    continue
+
+                parsed = extract_json_from_llm(raw_text)
+                return {"success": True, "data": parsed, "model_used": model, "raw_response": raw_text}
+            except Exception as e:
+                logger.warning(f"Model {model} failed to produce valid JSON or errored: {e}. Falling back...")
+                last_error = str(e)
+                continue
+
+        raise RuntimeError(f"All Ollama models ({models_to_try}) failed or triggered safety blocks. Last error: {last_error}")

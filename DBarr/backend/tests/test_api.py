@@ -26,12 +26,33 @@ async def test_settings_api(test_db):
         res = await client.get("/api/v1/settings")
         assert res.status_code == 200
         data = res.json()
-        assert data["sonarr_url"] == "http://localhost:8989"
+        assert data["ollama_primary_model"] == "gemma4:e2b"
+        assert data["max_concurrent_jobs"] == 1
+        assert data["max_concurrent_ollama_requests"] == 1
+        assert data["ai_batch_size"] == 1
+        assert "Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M" in data["ollama_fallback_models"]
 
         # Update settings
         update_res = await client.post(
             "/api/v1/settings",
-            json={"settings": {"sonarr_url": "http://192.168.8.56:8989", "sonarr_api_key": "test_key"}}
+            json={
+                "ollama_url": "http://localhost:11434",
+                "ollama_primary_model": "gemma4:e2b",
+                "ollama_fallback_models": ["Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M"],
+                "ollama_fallback_model": "Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M",
+                "ai_batch_size": 1,
+                "sonarr_url": "http://192.168.8.56:8989",
+                "sonarr_api_key": "test_key",
+                "tmdb_api_key": "",
+                "tvmaze_api_key": "",
+                "omdb_api_key": "",
+                "subdl_api_key": "",
+                "opensubtitles_api_key": "",
+                "opensubtitles_user_agent": "DBarr v0.1",
+                "max_concurrent_jobs": 1,
+                "max_concurrent_ollama_requests": 1,
+                "default_language": "en"
+            }
         )
         assert update_res.status_code == 200
 
@@ -43,3 +64,10 @@ async def test_settings_api(test_db):
         assert data2["sonarr_api_key"] == "test_key"
 
     app.dependency_overrides.clear()
+
+
+def test_ollama_safety_refusal_detection():
+    from backend.app.services.ollama_client import is_safety_refusal
+    assert is_safety_refusal("I cannot fulfill this request because it violates safety guidelines.") is True
+    assert is_safety_refusal("I am sorry, but I cannot process this episode description.") is True
+    assert is_safety_refusal("{\"matched\": true, \"confidence\": 1.0}") is False
