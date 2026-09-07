@@ -1,14 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Activity as ActivityIcon, RefreshCw, XCircle, Terminal } from 'lucide-react';
+import { Activity as ActivityIcon, RefreshCw, XCircle, Terminal, ArrowDown } from 'lucide-react';
 import { api } from '../services/api';
 import { Job } from '../types';
 
-export const Activity: React.FC = () => {
+interface ActivityProps {
+  initialJobId?: number | null;
+}
+
+export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
+  const [selectedJobId, setSelectedJobId] = useState<number | null>(initialJobId ?? null);
   const [cancellingId, setCancellingId] = useState<number | null>(null);
+  const [isAutoScroll, setIsAutoScroll] = useState(true);
+
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const prevJobIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     loadJobs();
@@ -20,9 +27,19 @@ export const Activity: React.FC = () => {
     try {
       const data = await api.getJobs();
       setJobs(data);
-      if (data.length > 0 && selectedJobId === null) {
-        setSelectedJobId(data[0].id);
-      }
+
+      setSelectedJobId(prevId => {
+        // If initialJobId was provided and exists, and prevId is null, use initialJobId
+        if (prevId === null && initialJobId && data.some(j => j.id === initialJobId)) {
+          return initialJobId;
+        }
+        // If user already has a selected job and it still exists in data, NEVER reset it!
+        if (prevId !== null && data.some(j => j.id === prevId)) {
+          return prevId;
+        }
+        // Otherwise default to the first available job
+        return data.length > 0 ? data[0].id : null;
+      });
     } catch (err) {
       console.error('Failed to load jobs:', err);
     } finally {
@@ -34,7 +51,7 @@ export const Activity: React.FC = () => {
     setCancellingId(jobId);
     try {
       await api.cancelJob(jobId);
-      loadJobs();
+      await loadJobs();
     } catch (err: any) {
       alert(err.message || 'Failed to cancel job');
     } finally {
@@ -42,13 +59,45 @@ export const Activity: React.FC = () => {
     }
   };
 
-  const selectedJob = jobs.find(j => j.id === selectedJobId) || jobs[0];
+  const handleSelectJob = (jobId: number) => {
+    setSelectedJobId(jobId);
+    setIsAutoScroll(true);
+  };
 
+  const selectedJob = jobs.find(j => j.id === selectedJobId) || (jobs.length > 0 ? jobs[0] : null);
+
+  // When selected job changes, scroll console to bottom and re-engage auto-scroll
   useEffect(() => {
+    if (selectedJobId !== null && selectedJobId !== prevJobIdRef.current) {
+      prevJobIdRef.current = selectedJobId;
+      setIsAutoScroll(true);
+      if (logContainerRef.current) {
+        logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+      }
+    }
+  }, [selectedJobId]);
+
+  // When logs update for selected job, only auto-scroll if user is pinned to the bottom
+  useEffect(() => {
+    if (isAutoScroll && logContainerRef.current) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
+  }, [selectedJob?.logs, isAutoScroll]);
+
+  const handleConsoleScroll = () => {
+    if (!logContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = logContainerRef.current;
+    // User is considered at the bottom if within 60px
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 60;
+    setIsAutoScroll(isAtBottom);
+  };
+
+  const scrollToBottom = () => {
+    setIsAutoScroll(true);
     if (logContainerRef.current) {
       logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
     }
-  }, [selectedJob?.logs]);
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 animate-fade-in">
@@ -91,11 +140,11 @@ export const Activity: React.FC = () => {
               return (
                 <div
                   key={job.id}
-                  onClick={() => setSelectedJobId(job.id)}
+                  onClick={() => handleSelectJob(job.id)}
                   className={`p-4 rounded-xl border transition-all cursor-pointer ${
                     isSelected
-                      ? 'bg-dark-800 border-indigo-500 shadow-lg shadow-indigo-950/40'
-                      : 'bg-dark-850/80 border-dark-700/80 hover:border-dark-600'
+                      ? 'bg-dark-800 border-indigo-500 shadow-lg shadow-indigo-950/40 ring-1 ring-indigo-500/50'
+                      : 'bg-dark-850/80 border-dark-700/80 hover:border-dark-600 hover:bg-dark-800/50'
                   }`}
                 >
                   <div className="flex items-center justify-between mb-2">
@@ -168,11 +217,35 @@ export const Activity: React.FC = () => {
                 </div>
 
                 {/* Console */}
-                <div className="flex-1 bg-dark-950 rounded-xl border border-dark-800 p-4 font-mono text-xs overflow-y-auto flex flex-col" ref={logContainerRef}>
-                  <div className="flex items-center space-x-2 text-slate-500 mb-2 pb-2 border-b border-dark-850">
-                    <Terminal className="w-3.5 h-3.5" />
-                    <span>Real-Time Execution Logs</span>
+                <div
+                  className="flex-1 bg-dark-950 rounded-xl border border-dark-800 p-4 font-mono text-xs overflow-y-auto flex flex-col"
+                  ref={logContainerRef}
+                  onScroll={handleConsoleScroll}
+                >
+                  <div className="flex items-center justify-between text-slate-500 mb-2 pb-2 border-b border-dark-850">
+                    <div className="flex items-center space-x-2">
+                      <Terminal className="w-3.5 h-3.5 text-slate-400" />
+                      <span className="font-sans text-xs font-medium text-slate-400">Real-Time Execution Logs</span>
+                    </div>
+
+                    <div className="flex items-center space-x-2">
+                      <button
+                        type="button"
+                        onClick={scrollToBottom}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold flex items-center space-x-1.5 transition-colors ${
+                          isAutoScroll
+                            ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                            : 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-600 hover:text-white cursor-pointer'
+                        }`}
+                        title={isAutoScroll ? 'Auto-scroll is active' : 'Click to jump to latest logs and resume auto-scroll'}
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full ${isAutoScroll ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                        <span>{isAutoScroll ? 'Live Auto-Scroll' : 'Jump to Latest (Paused)'}</span>
+                        {!isAutoScroll && <ArrowDown className="w-3 h-3" />}
+                      </button>
+                    </div>
                   </div>
+
                   <div className="flex-1 text-slate-300 whitespace-pre-wrap leading-relaxed">
                     {selectedJob.logs || 'No logs recorded yet.'}
                   </div>

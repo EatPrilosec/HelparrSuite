@@ -11,6 +11,8 @@ export const App: React.FC = () => {
   const [selectedShowId, setSelectedShowId] = useState<number | null>(null);
   const [isImportOpen, setIsImportOpen] = useState(false);
 
+  const [activeJobId, setActiveJobId] = useState<number | null>(null);
+
   const handleSelectShow = (showId: number) => {
     setSelectedShowId(showId);
   };
@@ -20,7 +22,10 @@ export const App: React.FC = () => {
     setCurrentTab('dashboard');
   };
 
-  const handleImportStarted = (_jobIds: number[]) => {
+  const handleImportStarted = (jobIds: number[]) => {
+    if (jobIds && jobIds.length > 0) {
+      setActiveJobId(jobIds[0]);
+    }
     // Navigate user to activity tab to view jobs in real-time
     setCurrentTab('activity');
   };
@@ -49,7 +54,7 @@ export const App: React.FC = () => {
             onOpenImport={() => setIsImportOpen(true)}
           />
         ) : currentTab === 'activity' ? (
-          <Activity />
+          <Activity initialJobId={activeJobId} />
         ) : (
           <Settings />
         )}
