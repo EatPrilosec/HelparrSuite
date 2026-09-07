@@ -36,7 +36,6 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
 
     max_jobs = int(data.get("max_concurrent_jobs", 1)) if str(data.get("max_concurrent_jobs", "")).isdigit() else 1
     max_ollama = int(data.get("max_concurrent_ollama_requests", 1)) if str(data.get("max_concurrent_ollama_requests", "")).isdigit() else 1
-    batch_size = int(data.get("ai_batch_size", 1)) if str(data.get("ai_batch_size", "")).isdigit() else 1
 
     concurrency_manager.update_limits(max_jobs, max_ollama)
 
@@ -65,7 +64,6 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
         ollama_primary_model=primary_model,
         ollama_fallback_models=fallback_models,
         ollama_fallback_model=fallback_models[0],
-        ai_batch_size=max(1, batch_size),
         sonarr_url=data.get("sonarr_url", ""),
         sonarr_api_key=data.get("sonarr_api_key", ""),
         tmdb_api_key=data.get("tmdb_api_key", ""),
@@ -148,14 +146,12 @@ async def update_settings(payload: Union[AppSettings, SettingUpdate, Dict[str, A
     merged["ollama_fallback_models"] = json.dumps(clean_fallbacks)
     merged["ollama_fallback_model"] = clean_fallbacks[0]
 
-    # Process concurrency and batch limits
+    # Process concurrency limits
     max_jobs = int(merged.get("max_concurrent_jobs", 1)) if str(merged.get("max_concurrent_jobs", "")).isdigit() else 1
     max_ollama = int(merged.get("max_concurrent_ollama_requests", 1)) if str(merged.get("max_concurrent_ollama_requests", "")).isdigit() else 1
-    batch_size = int(merged.get("ai_batch_size", 1)) if str(merged.get("ai_batch_size", "")).isdigit() else 1
 
     merged["max_concurrent_jobs"] = str(max(1, max_jobs))
     merged["max_concurrent_ollama_requests"] = str(max(1, max_ollama))
-    merged["ai_batch_size"] = str(max(1, batch_size))
 
     # Persist all merged settings to DB
     for k, val_str in merged.items():
@@ -176,7 +172,6 @@ async def update_settings(payload: Union[AppSettings, SettingUpdate, Dict[str, A
         ollama_primary_model=merged.get("ollama_primary_model", "gemma4:e2b"),
         ollama_fallback_models=clean_fallbacks,
         ollama_fallback_model=clean_fallbacks[0],
-        ai_batch_size=max(1, batch_size),
         sonarr_url=merged.get("sonarr_url", ""),
         sonarr_api_key=merged.get("sonarr_api_key", ""),
         tmdb_api_key=merged.get("tmdb_api_key", ""),

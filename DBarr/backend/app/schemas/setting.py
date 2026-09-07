@@ -9,9 +9,6 @@ class AppSettings(BaseModel):
     ollama_fallback_models: List[str] = ["Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M"]
     ollama_fallback_model: str = "Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M"
     
-    # Matching Engine Configuration
-    ai_batch_size: int = 1
-    
     # Sonarr
     sonarr_url: str = ""
     sonarr_api_key: str = ""

@@ -204,6 +204,9 @@ class VerificationEngine:
                 except Exception as e:
                     logger.warning(f"TMDB lookup error for {show.title}: {e}")
 
+            max_concurrent_ai = int(cfg.get("max_concurrent_ollama_requests", 1)) if str(cfg.get("max_concurrent_ollama_requests", "")).isdigit() else 1
+            max_concurrent_episodes = max(1, max_concurrent_ai)
+
             # Pre-fetch TVmaze episode roster if show ID is available
             if show.tvmaze_id:
                 try:
@@ -232,101 +235,120 @@ class VerificationEngine:
                     elif v.source_name == "omdb" and v.source_episode_id:
                         claimed_omdb_ids.add(str(v.source_episode_id))
 
-            # Iterate over episodes
-            for idx, ep in enumerate(sorted_episodes, start=1):
+            show_title = show.title
+            show_imdb_id = show.imdb_id
+            show_tmdb_id = show.tmdb_id
+            show_tvmaze_id = show.tvmaze_id
+
+            state_lock = asyncio.Lock()
+            progress_lock = asyncio.Lock()
+            completed_count = 0
+
+            async def process_episode(idx: int, ep_id: int):
+                nonlocal completed_count
                 if concurrency_manager.is_cancelled(job_id):
-                    await concurrency_manager.append_log(job_id, "Audit cancelled by user request.")
                     return
 
-                s_num = ep.season_number
-                e_num = ep.episode_number
-                ep_label = f"S{s_num:02d}E{e_num:02d}"
-                pct = 5.0 + (float(idx - 1) / float(total_eps) * 92.0)
+                async with AsyncSessionLocal() as ep_db:
+                    res_ep = await ep_db.execute(
+                        select(Episode)
+                        .where(Episode.id == ep_id)
+                        .options(
+                            selectinload(Episode.transcripts),
+                            selectinload(Episode.source_variations),
+                        )
+                    )
+                    ep = res_ep.scalars().first()
+                    if not ep:
+                        return
 
-                await concurrency_manager.append_log(
-                    job_id,
-                    f"[{idx}/{total_eps}] Auditing {ep_label} - \"{ep.title}\"...",
-                    pct
-                )
+                    s_num = ep.season_number
+                    e_num = ep.episode_number
+                    ep_label = f"S{s_num:02d}E{e_num:02d}"
 
-                audit_trail: List[str] = []
+                    # Skip if already fully verified with both primary metadata providers
+                    has_tmdb = any(v.source_name == "tmdb" for v in ep.source_variations)
+                    has_tvm = any(v.source_name == "tvmaze" for v in ep.source_variations)
+                    if ep.ai_verification_status == "AI_MATCHED" and (has_tmdb and has_tvm):
+                        async with progress_lock:
+                            completed_count += 1
+                            pct = 5.0 + (float(completed_count) / float(total_eps) * 92.0)
+                            await concurrency_manager.append_log(
+                                job_id,
+                                f"[{completed_count}/{total_eps}] {ep_label} is already verified (AI_MATCHED). Skipping.",
+                                pct
+                            )
+                        return
 
-                # Skip if already fully verified with both primary metadata providers
-                has_tmdb = any(v.source_name == "tmdb" for v in ep.source_variations)
-                has_tvm = any(v.source_name == "tvmaze" for v in ep.source_variations)
-                if ep.ai_verification_status == "AI_MATCHED" and (has_tmdb and has_tvm):
                     await concurrency_manager.append_log(
                         job_id,
-                        f"[{idx}/{total_eps}] {ep_label} is already verified (AI_MATCHED). Skipping.",
-                        pct
+                        f"[{idx}/{total_eps}] Auditing {ep_label} - \"{ep.title}\"..."
                     )
-                    continue
 
-                # =========================================================================
-                # STEP 1: Native Subtitle & Canonical Transcript Discovery (LLM Pass 1)
-                # =========================================================================
-                transcript_record = next((t for t in ep.transcripts if t.is_native_language), None)
-                transcript_text = transcript_record.raw_content if transcript_record else ""
-                transcript_preview = transcript_record.preview_text if transcript_record else ""
+                    audit_trail: List[str] = []
 
-                if not transcript_record:
-                    # 1a. Search internet subtitles (OpenSubtitles with automatic SubDL fallback)
-                    candidate_subs: List[Dict[str, Any]] = []
-                    provider_used = "opensubtitles"
-                    raw_sub_text = None
+                    # =========================================================================
+                    # STEP 1: Native Subtitle & Canonical Transcript Discovery (LLM Pass 1)
+                    # =========================================================================
+                    transcript_record = next((t for t in ep.transcripts if t.is_native_language), None)
+                    transcript_text = transcript_record.raw_content if transcript_record else ""
+                    transcript_preview = transcript_record.preview_text if transcript_record else ""
 
-                    if opensubs_key:
-                        try:
-                            candidate_subs = await OpenSubtitlesClient.search_subtitles(
-                                api_key=opensubs_key,
-                                user_agent=opensubs_ua,
-                                imdb_id=show.imdb_id,
-                                tmdb_id=show.tmdb_id,
-                                season_number=s_num,
-                                episode_number=e_num,
-                                languages=lang_code
-                            )
-                            if candidate_subs:
-                                first_sub = candidate_subs[0]
-                                files = first_sub.get("attributes", {}).get("files", [])
-                                file_id = files[0].get("file_id") if files else None
-                                if file_id:
-                                    raw_sub_text = await OpenSubtitlesClient.download_subtitle_file(
-                                        api_key=opensubs_key,
-                                        file_id=file_id,
-                                        user_agent=opensubs_ua
-                                    )
-                        except Exception as e:
-                            logger.warning(f"OpenSubtitles search/download failed for {ep_label}: {e}")
+                    if not transcript_record:
+                        candidate_subs: List[Dict[str, Any]] = []
+                        provider_used = "opensubtitles"
+                        raw_sub_text = None
 
-                    # Fallback to SubDL if OpenSubtitles yielded no subtitle or download failed (e.g. quota limit)
-                    if not raw_sub_text and subdl_key:
-                        try:
-                            subdl_subs = await SubDLClient.search_subtitles(
-                                api_key=subdl_key,
-                                imdb_id=show.imdb_id,
-                                tmdb_id=show.tmdb_id,
-                                season_number=s_num,
-                                episode_number=e_num,
-                                languages=lang_code
-                            )
-                            if subdl_subs:
-                                first_sub = subdl_subs[0]
-                                sub_url = first_sub.get("url") or first_sub.get("download_link")
-                                if sub_url:
-                                    raw_sub_text = await SubDLClient.download_subtitle_content(sub_url)
-                                    if raw_sub_text:
-                                        provider_used = "subdl"
-                        except Exception as e:
-                            logger.warning(f"SubDL fallback failed for {ep_label}: {e}")
+                        if opensubs_key:
+                            try:
+                                candidate_subs = await OpenSubtitlesClient.search_subtitles(
+                                    api_key=opensubs_key,
+                                    user_agent=opensubs_ua,
+                                    imdb_id=show_imdb_id,
+                                    tmdb_id=show_tmdb_id,
+                                    season_number=s_num,
+                                    episode_number=e_num,
+                                    languages=lang_code
+                                )
+                                if candidate_subs:
+                                    first_sub = candidate_subs[0]
+                                    files = first_sub.get("attributes", {}).get("files", [])
+                                    file_id = files[0].get("file_id") if files else None
+                                    if file_id:
+                                        raw_sub_text = await OpenSubtitlesClient.download_subtitle_file(
+                                            api_key=opensubs_key,
+                                            file_id=file_id,
+                                            user_agent=opensubs_ua
+                                        )
+                            except Exception as e:
+                                logger.warning(f"OpenSubtitles search/download failed for {ep_label}: {e}")
 
-                    # 1b. LLM Pass 1: Verify subtitle matches Sonarr baseline & extract anchors
-                    if raw_sub_text:
-                        clean_text, preview = TranscriptService.clean_subtitle_text(raw_sub_text)
-                        if clean_text:
-                            async with concurrency_manager.ollama_semaphore:
-                                pass1_prompt = f"""Target Episode:
-- Series: "{show.title}"
+                        if not raw_sub_text and subdl_key:
+                            try:
+                                subdl_subs = await SubDLClient.search_subtitles(
+                                    api_key=subdl_key,
+                                    imdb_id=show_imdb_id,
+                                    tmdb_id=show_tmdb_id,
+                                    season_number=s_num,
+                                    episode_number=e_num,
+                                    languages=lang_code
+                                )
+                                if subdl_subs:
+                                    first_sub = subdl_subs[0]
+                                    sub_url = first_sub.get("url") or first_sub.get("download_link")
+                                    if sub_url:
+                                        raw_sub_text = await SubDLClient.download_subtitle_content(sub_url)
+                                        if raw_sub_text:
+                                            provider_used = "subdl"
+                            except Exception as e:
+                                logger.warning(f"SubDL fallback failed for {ep_label}: {e}")
+
+                        if raw_sub_text:
+                            clean_text, preview = TranscriptService.clean_subtitle_text(raw_sub_text)
+                            if clean_text:
+                                async with concurrency_manager.ollama_semaphore:
+                                    pass1_prompt = f"""Target Episode:
+- Series: "{show_title}"
 - Season: {s_num}, Episode: {e_num}
 - Title: "{ep.title}"
 - Plot Overview: "{ep.overview or 'N/A'}"
@@ -345,75 +367,77 @@ Respond with JSON schema:
   "reasoning": "Explanation of dialogue match",
   "dialogue_anchors": ["line 1", "line 2"]
 }}"""
-                                try:
-                                    llm_p1 = await OllamaClient.query_with_fallback_json(
-                                        base_url=ollama_url,
-                                        primary_model=ollama_primary,
-                                        fallback_models=ollama_fallbacks,
-                                        user_prompt=pass1_prompt,
-                                        system_prompt="You are DBarr's authoritative subtitle & dialogue auditor. 100% accuracy required. Never guess.",
-                                        timeout=120.0,
-                                        options={"temperature": 0.1, "num_predict": 256}
-                                    )
-                                    p1_data = llm_p1.get("data", {})
-                                    if p1_data.get("matched") and float(p1_data.get("confidence", 0)) >= 0.75:
-                                        anchors = p1_data.get("dialogue_anchors", [])
-                                        new_transcript = Transcript(
-                                            episode_id=ep.id,
-                                            language=lang_code,
-                                            is_native_language=True,
-                                            source_provider=provider_used,
-                                            raw_content=clean_text,
-                                            preview_text=preview,
-                                            dialogue_anchors=json.dumps(anchors) if isinstance(anchors, list) else str(anchors),
+                                    try:
+                                        llm_p1 = await OllamaClient.query_with_fallback_json(
+                                            base_url=ollama_url,
+                                            primary_model=ollama_primary,
+                                            fallback_models=ollama_fallbacks,
+                                            user_prompt=pass1_prompt,
+                                            system_prompt="You are DBarr's authoritative subtitle & dialogue auditor. 100% accuracy required. Never guess.",
+                                            timeout=120.0,
+                                            options={"temperature": 0.1, "num_predict": 256}
                                         )
-                                        db.add(new_transcript)
-                                        transcript_text = clean_text
-                                        transcript_preview = preview
-                                        audit_trail.append(f"Transcript verified via {provider_used} ({p1_data.get('confidence', 1.0):.2f}): {p1_data.get('reasoning', '')}")
-                                        await concurrency_manager.append_log(job_id, f"  -> [Pass 1] Subtitle transcript locked via {provider_used}")
+                                        p1_data = llm_p1.get("data", {})
+                                        if p1_data.get("matched") and float(p1_data.get("confidence", 0)) >= 0.75:
+                                            anchors = p1_data.get("dialogue_anchors", [])
+                                            new_transcript = Transcript(
+                                                episode_id=ep.id,
+                                                language=lang_code,
+                                                is_native_language=True,
+                                                source_provider=provider_used,
+                                                raw_content=clean_text,
+                                                preview_text=preview,
+                                                dialogue_anchors=json.dumps(anchors) if isinstance(anchors, list) else str(anchors),
+                                            )
+                                            ep_db.add(new_transcript)
+                                            transcript_text = clean_text
+                                            transcript_preview = preview
+                                            audit_trail.append(f"Transcript verified via {provider_used} ({p1_data.get('confidence', 1.0):.2f}): {p1_data.get('reasoning', '')}")
+                                            await concurrency_manager.append_log(job_id, f"  -> [Pass 1] {ep_label} subtitle transcript locked via {provider_used}")
+                                    except Exception as e:
+                                        logger.warning(f"LLM Pass 1 failed for {ep_label}: {e}")
+
+                        if not transcript_preview:
+                            transcript_preview = f"{ep.title}. {ep.overview or ''}"
+                            audit_trail.append("Internet transcript unavailable (quota/missing); baseline plot used")
+                            await concurrency_manager.append_log(
+                                job_id,
+                                f"  -> [Pass 1] Internet subtitle transcript unavailable for {ep_label}; using Sonarr baseline plot"
+                            )
+
+                    if concurrency_manager.is_cancelled(job_id):
+                        return
+
+                    # =========================================================================
+                    # STEP 2: TMDB Cumulative Verification (LLM Pass 2)
+                    # =========================================================================
+                    tmdb_variation = next((v for v in ep.source_variations if v.source_name == "tmdb"), None)
+                    if not tmdb_variation and tmdb_key and show_tmdb_id:
+                        async with state_lock:
+                            if s_num not in tmdb_season_cache:
+                                try:
+                                    tmdb_season_cache[s_num] = await TMDBClient.get_season_episodes(tmdb_key, show_tmdb_id, s_num)
                                 except Exception as e:
-                                    logger.warning(f"LLM Pass 1 failed for {ep_label}: {e}")
+                                    logger.warning(f"Failed to fetch TMDB season {s_num}: {e}")
+                                    tmdb_season_cache[s_num] = []
+                            candidates = tmdb_season_cache.get(s_num, [])
+                            avail_candidates = [c for c in candidates if str(c.get("id")) not in claimed_tmdb_ids]
+                            target_candidates = avail_candidates if avail_candidates else candidates
 
-                    if not transcript_preview:
-                        transcript_preview = f"{ep.title}. {ep.overview or ''}"
-                        audit_trail.append("Internet transcript unavailable (quota/missing); baseline plot used")
-                        await concurrency_manager.append_log(
-                            job_id,
-                            f"  -> [Pass 1] Internet subtitle transcript unavailable for {ep_label}; using Sonarr baseline plot"
-                        )
+                        if target_candidates:
+                            cand_summaries = []
+                            for c in target_candidates:
+                                cand_summaries.append({
+                                    "tmdb_episode_id": c.get("id"),
+                                    "season_number": c.get("season_number"),
+                                    "episode_number": c.get("episode_number"),
+                                    "name": c.get("name"),
+                                    "overview": c.get("overview", "")[:200],
+                                    "air_date": c.get("air_date")
+                                })
 
-                # =========================================================================
-                # STEP 2: TMDB Cumulative Verification (LLM Pass 2)
-                # =========================================================================
-                tmdb_variation = next((v for v in ep.source_variations if v.source_name == "tmdb"), None)
-                if not tmdb_variation and tmdb_key and show.tmdb_id:
-                    # Pre-fetch season from TMDB if not cached
-                    if s_num not in tmdb_season_cache:
-                        try:
-                            tmdb_season_cache[s_num] = await TMDBClient.get_season_episodes(tmdb_key, show.tmdb_id, s_num)
-                        except Exception as e:
-                            logger.warning(f"Failed to fetch TMDB season {s_num}: {e}")
-                            tmdb_season_cache[s_num] = []
-
-                    candidates = tmdb_season_cache.get(s_num, [])
-                    avail_candidates = [c for c in candidates if str(c.get("id")) not in claimed_tmdb_ids]
-                    target_candidates = avail_candidates if avail_candidates else candidates
-
-                    if target_candidates:
-                        cand_summaries = []
-                        for c in target_candidates:
-                            cand_summaries.append({
-                                "tmdb_episode_id": c.get("id"),
-                                "season_number": c.get("season_number"),
-                                "episode_number": c.get("episode_number"),
-                                "name": c.get("name"),
-                                "overview": c.get("overview", "")[:200],
-                                "air_date": c.get("air_date")
-                            })
-
-                        async with concurrency_manager.ollama_semaphore:
-                            pass2_prompt = f"""Target Episode Baseline (Sonarr):
+                            async with concurrency_manager.ollama_semaphore:
+                                pass2_prompt = f"""Target Episode Baseline (Sonarr):
 - Season: {s_num}, Episode: {e_num}
 - Title: "{ep.title}"
 - Overview: "{ep.overview or 'N/A'}"
@@ -437,74 +461,78 @@ Respond ONLY in JSON format:
   "reasoning": "Why this TMDB episode matches based on title and narrative",
   "alternate_titles": ["Alt title"]
 }}"""
-                            try:
-                                llm_p2 = await OllamaClient.query_with_fallback_json(
-                                    base_url=ollama_url,
-                                    primary_model=ollama_primary,
-                                    fallback_models=ollama_fallbacks,
-                                    user_prompt=pass2_prompt,
-                                    system_prompt="You are DBarr's authoritative episode metadata matcher.",
-                                    timeout=120.0,
-                                    options={"temperature": 0.1, "num_predict": 256}
-                                )
-                                p2_data = llm_p2.get("data", {})
-                                matched_c_id = p2_data.get("tmdb_episode_id")
-                                matched_c = next((c for c in target_candidates if c.get("id") == matched_c_id), None)
-                                if not matched_c and candidates:
-                                    matched_c = next((c for c in candidates if c.get("id") == matched_c_id), None)
-
-                                if matched_c and p2_data.get("matched", True):
-                                    claimed_tmdb_ids.add(str(matched_c.get("id")))
-                                    tmdb_var = EpisodeSourceMetadata(
-                                        episode_id=ep.id,
-                                        show_id=show.id,
-                                        source_name="tmdb",
-                                        source_show_id=str(show.tmdb_id),
-                                        source_episode_id=str(matched_c.get("id")),
-                                        source_season_number=matched_c.get("season_number"),
-                                        source_episode_number=matched_c.get("episode_number"),
-                                        title=matched_c.get("name"),
-                                        alternate_titles=json.dumps(p2_data.get("alternate_titles", [])),
-                                        overview=matched_c.get("overview"),
-                                        air_date=matched_c.get("air_date"),
-                                        match_method="LLM_TRANSCRIPT_AND_METADATA_CONFIRMED",
-                                        match_confidence=float(p2_data.get("confidence", 1.0)),
-                                        llm_reasoning=p2_data.get("reasoning", "LLM confirmed TMDB match"),
-                                        raw_metadata=json.dumps(matched_c)
+                                try:
+                                    llm_p2 = await OllamaClient.query_with_fallback_json(
+                                        base_url=ollama_url,
+                                        primary_model=ollama_primary,
+                                        fallback_models=ollama_fallbacks,
+                                        user_prompt=pass2_prompt,
+                                        system_prompt="You are DBarr's authoritative episode metadata matcher.",
+                                        timeout=120.0,
+                                        options={"temperature": 0.1, "num_predict": 256}
                                     )
-                                    db.add(tmdb_var)
-                                    audit_trail.append(f"TMDB match confirmed (ID: {matched_c.get('id')}, {p2_data.get('confidence', 1.0):.2f})")
-                                    await concurrency_manager.append_log(job_id, f"  -> [Pass 2] TMDB mapped: '{matched_c.get('name')}'")
-                            except Exception as e:
-                                logger.warning(f"LLM Pass 2 failed for {ep_label}: {e}")
+                                    p2_data = llm_p2.get("data", {})
+                                    matched_c_id = p2_data.get("tmdb_episode_id")
+                                    matched_c = next((c for c in target_candidates if c.get("id") == matched_c_id), None)
+                                    if not matched_c and candidates:
+                                        matched_c = next((c for c in candidates if c.get("id") == matched_c_id), None)
 
-                # =========================================================================
-                # STEP 3: TVmaze Cumulative Verification (LLM Pass 3)
-                # =========================================================================
-                tvmaze_variation = next((v for v in ep.source_variations if v.source_name == "tvmaze"), None)
-                if not tvmaze_variation and tvmaze_episodes_cache:
-                    # Filter TVmaze candidates for this season or nearby
-                    tvm_candidates = [
-                        c for c in tvmaze_episodes_cache
-                        if (c.get("season") == s_num) or (s_num == 0 and c.get("season") == 0)
-                    ]
-                    avail_tvm = [c for c in tvm_candidates if str(c.get("id")) not in claimed_tvm_ids]
-                    target_tvm = avail_tvm if avail_tvm else tvm_candidates
+                                    if matched_c and p2_data.get("matched", True):
+                                        async with state_lock:
+                                            claimed_tmdb_ids.add(str(matched_c.get("id")))
+                                        tmdb_var = EpisodeSourceMetadata(
+                                            episode_id=ep.id,
+                                            show_id=show_id,
+                                            source_name="tmdb",
+                                            source_show_id=str(show_tmdb_id),
+                                            source_episode_id=str(matched_c.get("id")),
+                                            source_season_number=matched_c.get("season_number"),
+                                            source_episode_number=matched_c.get("episode_number"),
+                                            title=matched_c.get("name"),
+                                            alternate_titles=json.dumps(p2_data.get("alternate_titles", [])),
+                                            overview=matched_c.get("overview"),
+                                            air_date=matched_c.get("air_date"),
+                                            match_method="LLM_TRANSCRIPT_AND_METADATA_CONFIRMED",
+                                            match_confidence=float(p2_data.get("confidence", 1.0)),
+                                            llm_reasoning=p2_data.get("reasoning", "LLM confirmed TMDB match"),
+                                            raw_metadata=json.dumps(matched_c)
+                                        )
+                                        ep_db.add(tmdb_var)
+                                        audit_trail.append(f"TMDB match confirmed (ID: {matched_c.get('id')}, {p2_data.get('confidence', 1.0):.2f})")
+                                        await concurrency_manager.append_log(job_id, f"  -> [Pass 2] {ep_label} TMDB mapped: '{matched_c.get('name')}'")
+                                except Exception as e:
+                                    logger.warning(f"LLM Pass 2 failed for {ep_label}: {e}")
 
-                    if target_tvm:
-                        cand_list = []
-                        for c in target_tvm:
-                            cand_list.append({
-                                "tvmaze_id": c.get("id"),
-                                "season": c.get("season"),
-                                "number": c.get("number"),
-                                "name": c.get("name"),
-                                "overview": clean_html_summary(c.get("summary"))[:200],
-                                "airdate": c.get("airdate")
-                            })
+                    if concurrency_manager.is_cancelled(job_id):
+                        return
 
-                        async with concurrency_manager.ollama_semaphore:
-                            pass3_prompt = f"""Target Episode Baseline (Sonarr):
+                    # =========================================================================
+                    # STEP 3: TVmaze Cumulative Verification (LLM Pass 3)
+                    # =========================================================================
+                    tvmaze_variation = next((v for v in ep.source_variations if v.source_name == "tvmaze"), None)
+                    if not tvmaze_variation and tvmaze_episodes_cache:
+                        tvm_candidates = [
+                            c for c in tvmaze_episodes_cache
+                            if (c.get("season") == s_num) or (s_num == 0 and c.get("season") == 0)
+                        ]
+                        async with state_lock:
+                            avail_tvm = [c for c in tvm_candidates if str(c.get("id")) not in claimed_tvm_ids]
+                            target_tvm = avail_tvm if avail_tvm else tvm_candidates
+
+                        if target_tvm:
+                            cand_list = []
+                            for c in target_tvm:
+                                cand_list.append({
+                                    "tvmaze_id": c.get("id"),
+                                    "season": c.get("season"),
+                                    "number": c.get("number"),
+                                    "name": c.get("name"),
+                                    "overview": clean_html_summary(c.get("summary"))[:200],
+                                    "airdate": c.get("airdate")
+                                })
+
+                            async with concurrency_manager.ollama_semaphore:
+                                pass3_prompt = f"""Target Episode Baseline (Sonarr):
 - Season: {s_num}, Episode: {e_num}
 - Title: "{ep.title}"
 - Overview: "{ep.overview or 'N/A'}"
@@ -527,75 +555,79 @@ Respond ONLY in JSON:
   "confidence": 1.0,
   "reasoning": "Reason for match based on title and narrative plot"
 }}"""
-                            try:
-                                llm_p3 = await OllamaClient.query_with_fallback_json(
-                                    base_url=ollama_url,
-                                    primary_model=ollama_primary,
-                                    fallback_models=ollama_fallbacks,
-                                    user_prompt=pass3_prompt,
-                                    system_prompt="You are DBarr's TVmaze linear broadcast matcher.",
-                                    timeout=120.0,
-                                    options={"temperature": 0.1, "num_predict": 256}
-                                )
-                                p3_data = llm_p3.get("data", {})
-                                matched_tvm_id = p3_data.get("tvmaze_id")
-                                matched_tvm = next((c for c in target_tvm if c.get("id") == matched_tvm_id), None)
-                                if not matched_tvm and tvm_candidates:
-                                    matched_tvm = next((c for c in tvm_candidates if c.get("id") == matched_tvm_id), None)
-
-                                if matched_tvm and p3_data.get("matched", True):
-                                    claimed_tvm_ids.add(str(matched_tvm.get("id")))
-                                    tvm_var = EpisodeSourceMetadata(
-                                        episode_id=ep.id,
-                                        show_id=show.id,
-                                        source_name="tvmaze",
-                                        source_show_id=str(show.tvmaze_id),
-                                        source_episode_id=str(matched_tvm.get("id")),
-                                        source_season_number=matched_tvm.get("season"),
-                                        source_episode_number=matched_tvm.get("number"),
-                                        title=matched_tvm.get("name"),
-                                        overview=matched_tvm.get("summary"),
-                                        air_date=matched_tvm.get("airdate"),
-                                        match_method="LLM_LINEAR_BROADCAST_CONFIRMED",
-                                        match_confidence=float(p3_data.get("confidence", 1.0)),
-                                        llm_reasoning=p3_data.get("reasoning", "TVmaze match confirmed based on title and plot"),
-                                        raw_metadata=json.dumps(matched_tvm)
+                                try:
+                                    llm_p3 = await OllamaClient.query_with_fallback_json(
+                                        base_url=ollama_url,
+                                        primary_model=ollama_primary,
+                                        fallback_models=ollama_fallbacks,
+                                        user_prompt=pass3_prompt,
+                                        system_prompt="You are DBarr's TVmaze linear broadcast matcher.",
+                                        timeout=120.0,
+                                        options={"temperature": 0.1, "num_predict": 256}
                                     )
-                                    db.add(tvm_var)
-                                    audit_trail.append(f"TVmaze broadcast match confirmed (ID: {matched_tvm.get('id')})")
-                                    await concurrency_manager.append_log(job_id, f"  -> [Pass 3] TVmaze mapped: S{matched_tvm.get('season')}E{matched_tvm.get('number')} '{matched_tvm.get('name')}'")
-                            except Exception as e:
-                                logger.warning(f"LLM Pass 3 failed for {ep_label}: {e}")
+                                    p3_data = llm_p3.get("data", {})
+                                    matched_tvm_id = p3_data.get("tvmaze_id")
+                                    matched_tvm = next((c for c in target_tvm if c.get("id") == matched_tvm_id), None)
+                                    if not matched_tvm and tvm_candidates:
+                                        matched_tvm = next((c for c in tvm_candidates if c.get("id") == matched_tvm_id), None)
 
-                # =========================================================================
-                # STEP 4: OMDb Cumulative Verification (LLM Pass 4)
-                # =========================================================================
-                omdb_variation = next((v for v in ep.source_variations if v.source_name == "omdb"), None)
-                if not omdb_variation and omdb_key and show.imdb_id and s_num > 0:
-                    if s_num not in omdb_season_cache:
-                        try:
-                            omdb_season_cache[s_num] = await OMDbClient.get_season_episodes(omdb_key, show.imdb_id, s_num)
-                        except Exception as e:
-                            logger.warning(f"Failed to fetch OMDb season {s_num}: {e}")
-                            omdb_season_cache[s_num] = []
+                                    if matched_tvm and p3_data.get("matched", True):
+                                        async with state_lock:
+                                            claimed_tvm_ids.add(str(matched_tvm.get("id")))
+                                        tvm_var = EpisodeSourceMetadata(
+                                            episode_id=ep.id,
+                                            show_id=show_id,
+                                            source_name="tvmaze",
+                                            source_show_id=str(show_tvmaze_id),
+                                            source_episode_id=str(matched_tvm.get("id")),
+                                            source_season_number=matched_tvm.get("season"),
+                                            source_episode_number=matched_tvm.get("number"),
+                                            title=matched_tvm.get("name"),
+                                            overview=matched_tvm.get("summary"),
+                                            air_date=matched_tvm.get("airdate"),
+                                            match_method="LLM_LINEAR_BROADCAST_CONFIRMED",
+                                            match_confidence=float(p3_data.get("confidence", 1.0)),
+                                            llm_reasoning=p3_data.get("reasoning", "TVmaze match confirmed based on title and plot"),
+                                            raw_metadata=json.dumps(matched_tvm)
+                                        )
+                                        ep_db.add(tvm_var)
+                                        audit_trail.append(f"TVmaze broadcast match confirmed (ID: {matched_tvm.get('id')})")
+                                        await concurrency_manager.append_log(job_id, f"  -> [Pass 3] {ep_label} TVmaze mapped: S{matched_tvm.get('season')}E{matched_tvm.get('number')} '{matched_tvm.get('name')}'")
+                                except Exception as e:
+                                    logger.warning(f"LLM Pass 3 failed for {ep_label}: {e}")
 
-                    omdb_candidates = omdb_season_cache.get(s_num, [])
-                    avail_omdb = [c for c in omdb_candidates if str(c.get("imdbID")) not in claimed_omdb_ids]
-                    target_omdb = avail_omdb if avail_omdb else omdb_candidates
+                    if concurrency_manager.is_cancelled(job_id):
+                        return
 
-                    if target_omdb:
-                        cand_list = []
-                        for c in target_omdb:
-                            cand_list.append({
-                                "imdb_id": c.get("imdbID"),
-                                "episode": c.get("Episode"),
-                                "title": c.get("Title"),
-                                "released": c.get("Released"),
-                                "imdb_rating": c.get("imdbRating")
-                            })
+                    # =========================================================================
+                    # STEP 4: OMDb Cumulative Verification (LLM Pass 4)
+                    # =========================================================================
+                    omdb_variation = next((v for v in ep.source_variations if v.source_name == "omdb"), None)
+                    if not omdb_variation and omdb_key and show_imdb_id and s_num > 0:
+                        async with state_lock:
+                            if s_num not in omdb_season_cache:
+                                try:
+                                    omdb_season_cache[s_num] = await OMDbClient.get_season_episodes(omdb_key, show_imdb_id, s_num)
+                                except Exception as e:
+                                    logger.warning(f"Failed to fetch OMDb season {s_num}: {e}")
+                                    omdb_season_cache[s_num] = []
+                            omdb_candidates = omdb_season_cache.get(s_num, [])
+                            avail_omdb = [c for c in omdb_candidates if str(c.get("imdbID")) not in claimed_omdb_ids]
+                            target_omdb = avail_omdb if avail_omdb else omdb_candidates
 
-                        async with concurrency_manager.ollama_semaphore:
-                            pass4_prompt = f"""Target Episode Baseline (Sonarr):
+                        if target_omdb:
+                            cand_list = []
+                            for c in target_omdb:
+                                cand_list.append({
+                                    "imdb_id": c.get("imdbID"),
+                                    "episode": c.get("Episode"),
+                                    "title": c.get("Title"),
+                                    "released": c.get("Released"),
+                                    "imdb_rating": c.get("imdbRating")
+                                })
+
+                            async with concurrency_manager.ollama_semaphore:
+                                pass4_prompt = f"""Target Episode Baseline (Sonarr):
 - Season: {s_num}, Episode: {e_num}
 - Title: "{ep.title}"
 - Overview: "{ep.overview or 'N/A'}"
@@ -618,68 +650,112 @@ Respond ONLY in JSON:
   "confidence": 1.0,
   "reasoning": "Why this IMDb entry matches based on title"
 }}"""
-                            try:
-                                llm_p4 = await OllamaClient.query_with_fallback_json(
-                                    base_url=ollama_url,
-                                    primary_model=ollama_primary,
-                                    fallback_models=ollama_fallbacks,
-                                    user_prompt=pass4_prompt,
-                                    system_prompt="You are DBarr's OMDb/IMDb episode auditor.",
-                                    timeout=120.0,
-                                    options={"temperature": 0.1, "num_predict": 256}
-                                )
-                                p4_data = llm_p4.get("data", {})
-                                matched_imdb_id = p4_data.get("imdb_id")
-                                matched_omdb = next((c for c in target_omdb if c.get("imdbID") == matched_imdb_id), None)
-                                if not matched_omdb and omdb_candidates:
-                                    matched_omdb = next((c for c in omdb_candidates if c.get("imdbID") == matched_imdb_id), None)
-
-                                if matched_omdb and p4_data.get("matched", True):
-                                    claimed_omdb_ids.add(str(matched_omdb.get("imdbID")))
-                                    omdb_var = EpisodeSourceMetadata(
-                                        episode_id=ep.id,
-                                        show_id=show.id,
-                                        source_name="omdb",
-                                        source_show_id=show.imdb_id,
-                                        source_episode_id=matched_omdb.get("imdbID"),
-                                        source_season_number=s_num,
-                                        source_episode_number=int(matched_omdb.get("Episode")) if str(matched_omdb.get("Episode", "")).isdigit() else e_num,
-                                        title=matched_omdb.get("Title"),
-                                        air_date=matched_omdb.get("Released"),
-                                        match_method="LLM_METADATA_CONFIRMED",
-                                        match_confidence=float(p4_data.get("confidence", 1.0)),
-                                        llm_reasoning=p4_data.get("reasoning", "OMDb match confirmed based on title"),
-                                        raw_metadata=json.dumps(matched_omdb)
+                                try:
+                                    llm_p4 = await OllamaClient.query_with_fallback_json(
+                                        base_url=ollama_url,
+                                        primary_model=ollama_primary,
+                                        fallback_models=ollama_fallbacks,
+                                        user_prompt=pass4_prompt,
+                                        system_prompt="You are DBarr's OMDb/IMDb episode auditor.",
+                                        timeout=120.0,
+                                        options={"temperature": 0.1, "num_predict": 256}
                                     )
-                                    db.add(omdb_var)
-                                    audit_trail.append(f"OMDb/IMDb match confirmed ({matched_omdb.get('imdbID')})")
-                                    await concurrency_manager.append_log(job_id, f"  -> [Pass 4] OMDb mapped: {matched_omdb.get('imdbID')} '{matched_omdb.get('Title')}'")
-                            except Exception as e:
-                                logger.warning(f"LLM Pass 4 failed for {ep_label}: {e}")
+                                    p4_data = llm_p4.get("data", {})
+                                    matched_imdb_id = p4_data.get("imdb_id")
+                                    matched_omdb = next((c for c in target_omdb if c.get("imdbID") == matched_imdb_id), None)
+                                    if not matched_omdb and omdb_candidates:
+                                        matched_omdb = next((c for c in omdb_candidates if c.get("imdbID") == matched_imdb_id), None)
 
-                # =========================================================================
-                # STEP 5: Commit Episode State & Update Audit Status
-                # =========================================================================
-                ep.ai_verification_status = "AI_MATCHED"
-                ep.ai_confidence_score = 1.0
-                ep.ai_audit_notes = " | ".join(audit_trail) if audit_trail else "Roster verified with Sonarr canonical baseline"
-                await db.commit()
+                                    if matched_omdb and p4_data.get("matched", True):
+                                        async with state_lock:
+                                            claimed_omdb_ids.add(str(matched_omdb.get("imdbID")))
+                                        omdb_var = EpisodeSourceMetadata(
+                                            episode_id=ep.id,
+                                            show_id=show_id,
+                                            source_name="omdb",
+                                            source_show_id=show_imdb_id,
+                                            source_episode_id=matched_omdb.get("imdbID"),
+                                            source_season_number=s_num,
+                                            source_episode_number=int(matched_omdb.get("Episode")) if str(matched_omdb.get("Episode", "")).isdigit() else e_num,
+                                            title=matched_omdb.get("Title"),
+                                            air_date=matched_omdb.get("Released"),
+                                            match_method="LLM_METADATA_CONFIRMED",
+                                            match_confidence=float(p4_data.get("confidence", 1.0)),
+                                            llm_reasoning=p4_data.get("reasoning", "OMDb match confirmed based on title"),
+                                            raw_metadata=json.dumps(matched_omdb)
+                                        )
+                                        ep_db.add(omdb_var)
+                                        audit_trail.append(f"OMDb/IMDb match confirmed ({matched_omdb.get('imdbID')})")
+                                        await concurrency_manager.append_log(job_id, f"  -> [Pass 4] {ep_label} OMDb mapped: {matched_omdb.get('imdbID')} '{matched_omdb.get('Title')}'")
+                                except Exception as e:
+                                    logger.warning(f"LLM Pass 4 failed for {ep_label}: {e}")
+
+                    # =========================================================================
+                    # STEP 5: Commit Episode State & Update Audit Status
+                    # =========================================================================
+                    ep.ai_verification_status = "AI_MATCHED"
+                    ep.ai_confidence_score = 1.0
+                    ep.ai_audit_notes = " | ".join(audit_trail) if audit_trail else "Roster verified with Sonarr canonical baseline"
+                    await ep_db.commit()
+
+                    async with progress_lock:
+                        completed_count += 1
+                        pct = 5.0 + (float(completed_count) / float(total_eps) * 92.0)
+                        await concurrency_manager.append_log(
+                            job_id,
+                            f"[{completed_count}/{total_eps}] Completed audit for {ep_label} - \"{ep.title}\"",
+                            pct
+                        )
+
+            # Queue all episodes for worker pool
+            queue = asyncio.Queue()
+            for idx, ep in enumerate(sorted_episodes, start=1):
+                queue.put_nowait((idx, ep.id))
+
+            async def worker():
+                while not queue.empty():
+                    if concurrency_manager.is_cancelled(job_id):
+                        break
+                    try:
+                        idx, ep_id = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    try:
+                        await process_episode(idx, ep_id)
+                    except Exception as err:
+                        logger.exception(f"Error auditing episode ID {ep_id}: {err}")
+                        await concurrency_manager.append_log(job_id, f"Error auditing episode ID {ep_id}: {err}")
+                    finally:
+                        queue.task_done()
+
+            num_workers = min(max_concurrent_episodes, total_eps) if total_eps > 0 else 1
+            await concurrency_manager.append_log(
+                job_id,
+                f"Starting verification workers for {total_eps} episode(s) (Concurrency: {num_workers} simultaneous episode(s))..."
+            )
+            worker_tasks = [asyncio.create_task(worker()) for _ in range(num_workers)]
+            await asyncio.gather(*worker_tasks)
 
             # Show completed
-            show.audit_status = "VERIFIED"
-            show.last_audited_at = datetime.utcnow()
-            await db.commit()
+            async with AsyncSessionLocal() as final_db:
+                res_show_final = await final_db.execute(select(Show).where(Show.id == show_id))
+                show_final = res_show_final.scalars().first()
+                if show_final:
+                    show_final.audit_status = "VERIFIED"
+                    show_final.last_audited_at = datetime.utcnow()
+                await final_db.commit()
 
             await concurrency_manager.append_log(
                 job_id,
-                f"AI Verification Complete! Verified {total_eps} episodes for '{show.title}'.",
+                f"AI Verification Complete! Verified {total_eps} episodes for '{show_title}'.",
                 100.0
             )
 
-            res_j_end = await db.execute(select(Job).where(Job.id == job_id))
-            db_job_end = res_j_end.scalars().first()
-            if db_job_end:
-                db_job_end.status = "COMPLETED"
-                db_job_end.finished_at = datetime.utcnow()
-                db_job_end.message = f"Successfully verified '{show.title}' ({total_eps} episodes)"
-            await db.commit()
+            async with AsyncSessionLocal() as final_db:
+                res_j_end = await final_db.execute(select(Job).where(Job.id == job_id))
+                db_job_end = res_j_end.scalars().first()
+                if db_job_end:
+                    db_job_end.status = "COMPLETED"
+                    db_job_end.finished_at = datetime.utcnow()
+                    db_job_end.message = f"Successfully verified '{show_title}' ({total_eps} episodes)"
+                await final_db.commit()

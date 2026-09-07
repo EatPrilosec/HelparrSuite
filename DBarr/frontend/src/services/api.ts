@@ -101,6 +101,15 @@ export const api = {
     return res.json();
   },
 
+  async restartJob(id: number): Promise<{ success: boolean; message: string }> {
+    const res = await fetch(`${API_BASE}/jobs/${id}/restart`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Failed to restart job' }));
+      throw new Error(err.detail || err.message || 'Failed to restart job');
+    }
+    return res.json();
+  },
+
   // Settings
   async getSettings(): Promise<AppSettings> {
     const res = await fetch(`${API_BASE}/settings`);

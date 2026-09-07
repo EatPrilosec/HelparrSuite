@@ -9,7 +9,6 @@ export const Settings: React.FC = () => {
     ollama_primary_model: 'gemma4:e2b',
     ollama_fallback_model: 'Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M',
     ollama_fallback_models: ['Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M'],
-    ai_batch_size: 1,
     sonarr_url: '',
     sonarr_api_key: '',
     tmdb_api_key: '',
@@ -48,7 +47,6 @@ export const Settings: React.FC = () => {
         ollama_primary_model: data.ollama_primary_model || 'gemma4:e2b',
         ollama_fallback_models: fbList,
         ollama_fallback_model: fbList[0],
-        ai_batch_size: data.ai_batch_size || 1,
         max_concurrent_jobs: data.max_concurrent_jobs || 1,
         max_concurrent_ollama_requests: data.max_concurrent_ollama_requests || 1,
       });
@@ -109,7 +107,6 @@ export const Settings: React.FC = () => {
         ollama_primary_model: settings.ollama_primary_model || 'gemma4:e2b',
         ollama_fallback_models: safeFallbacks,
         ollama_fallback_model: safeFallbacks[0],
-        ai_batch_size: Math.max(1, settings.ai_batch_size || 1),
         max_concurrent_jobs: Math.max(1, settings.max_concurrent_jobs || 1),
         max_concurrent_ollama_requests: Math.max(1, settings.max_concurrent_ollama_requests || 1),
       };
@@ -335,11 +332,11 @@ export const Settings: React.FC = () => {
             </div>
             <div>
               <h2 className="text-base font-bold text-white">Concurrency & Matching Limits</h2>
-              <p className="text-xs text-slate-400">Control background workers, parallel AI connections, and batch comparison sizes (defaults to 1)</p>
+              <p className="text-xs text-slate-400">Control background workers and parallel AI connections (defaults to 1)</p>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1.5">Max Concurrent Jobs</label>
               <input
@@ -364,19 +361,6 @@ export const Settings: React.FC = () => {
                 className="w-full px-3.5 py-2 rounded-xl bg-dark-900 border border-dark-700 text-white text-xs font-mono focus:outline-none focus:border-indigo-500"
               />
               <p className="text-[11px] text-slate-500 mt-1">Throttles parallel Ollama calls to prevent GPU thrashing (default: 1).</p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">AI Matching Batch Size</label>
-              <input
-                type="number"
-                min="1"
-                max="50"
-                value={settings.ai_batch_size || 1}
-                onChange={e => setSettings({ ...settings, ai_batch_size: Math.max(1, parseInt(e.target.value) || 1) })}
-                className="w-full px-3.5 py-2 rounded-xl bg-dark-900 border border-dark-700 text-white text-xs font-mono focus:outline-none focus:border-indigo-500"
-              />
-              <p className="text-[11px] text-slate-500 mt-1">Episodes audited per prompt (default: 1 for maximum accuracy).</p>
             </div>
           </div>
         </div>

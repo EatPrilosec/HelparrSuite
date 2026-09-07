@@ -40,7 +40,6 @@ async def test_settings_api(test_db):
                 "ollama_primary_model": "gemma4:e2b",
                 "ollama_fallback_models": ["Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M"],
                 "ollama_fallback_model": "Gemma-4-E2B-it-uncensored-GGUF:Q4_K_M",
-                "ai_batch_size": 1,
                 "sonarr_url": "http://192.168.8.56:8989",
                 "sonarr_api_key": "test_key",
                 "tmdb_api_key": "",

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Activity as ActivityIcon, RefreshCw, XCircle, Terminal, ArrowDown, Trash2, CheckCircle2, AlertCircle, Ban } from 'lucide-react';
+import { Activity as ActivityIcon, RefreshCw, XCircle, Terminal, ArrowDown, Trash2, CheckCircle2, AlertCircle, Ban, RotateCcw, AlertTriangle } from 'lucide-react';
 import { api } from '../services/api';
 import { Job } from '../types';
 
@@ -12,6 +12,7 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
   const [loading, setLoading] = useState(true);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(initialJobId ?? null);
   const [cancellingId, setCancellingId] = useState<number | null>(null);
+  const [restartingId, setRestartingId] = useState<number | null>(null);
   const [clearing, setClearing] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [isAutoScroll, setIsAutoScroll] = useState(true);
@@ -28,12 +29,23 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
   const loadJobs = async () => {
     try {
       const data = await api.getJobs();
-      // Sort active jobs (RUNNING, PENDING) to the top, then newest to oldest by ID
+      // Sort jobs strictly:
+      // 1. RUNNING jobs at the very top (rank 0)
+      // 2. PENDING jobs directly under running jobs (rank 1)
+      // 3. Stopped / Finished / Interrupted / Cancelled / Failed jobs at the bottom (rank 2)
+      const getStatusRank = (status: string) => {
+        if (status === 'RUNNING') return 0;
+        if (status === 'PENDING') return 1;
+        return 2;
+      };
+
       const sorted = [...data].sort((a, b) => {
-        const isActiveA = ['RUNNING', 'PENDING'].includes(a.status);
-        const isActiveB = ['RUNNING', 'PENDING'].includes(b.status);
-        if (isActiveA && !isActiveB) return -1;
-        if (!isActiveA && isActiveB) return 1;
+        const rankA = getStatusRank(a.status);
+        const rankB = getStatusRank(b.status);
+        if (rankA !== rankB) return rankA - rankB;
+        // Within PENDING: FIFO queue order (lowest ID first so next in line is at top of pending section)
+        if (rankA === 1) return a.id - b.id;
+        // Within RUNNING and completed/stopped: newest first
         return b.id - a.id;
       });
       setJobs(sorted);
@@ -96,6 +108,18 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
     }
   };
 
+  const handleRestart = async (jobId: number) => {
+    setRestartingId(jobId);
+    try {
+      await api.restartJob(jobId);
+      await loadJobs();
+    } catch (err: any) {
+      alert(err.message || 'Failed to restart job');
+    } finally {
+      setRestartingId(null);
+    }
+  };
+
   const handleSelectJob = (jobId: number) => {
     setSelectedJobId(jobId);
     setIsAutoScroll(true);
@@ -138,8 +162,9 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
 
   const completedCount = jobs.filter(j => j.status === 'COMPLETED').length;
   const failedCount = jobs.filter(j => j.status === 'FAILED').length;
-  const cancelledCount = jobs.filter(j => ['CANCELLED', 'INTERRUPTED'].includes(j.status)).length;
-  const totalInactiveCount = completedCount + failedCount + cancelledCount;
+  const cancelledCount = jobs.filter(j => j.status === 'CANCELLED').length;
+  const interruptedCount = jobs.filter(j => j.status === 'INTERRUPTED').length;
+  const totalInactiveCount = completedCount + failedCount + cancelledCount + interruptedCount;
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 animate-fade-in flex flex-col h-[calc(100vh-80px)]">
@@ -155,6 +180,19 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* Clear Interrupted */}
+          {interruptedCount > 0 && (
+            <button
+              onClick={() => handleClearJobs('interrupted')}
+              disabled={clearing !== null}
+              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-amber-950/50 hover:bg-amber-900/60 text-amber-300 border border-amber-800/60 text-xs font-semibold transition-all hover:scale-105 disabled:opacity-50"
+              title="Clear all interrupted jobs"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+              <span>Clear Interrupted ({interruptedCount})</span>
+            </button>
+          )}
+
           {/* Clear Cancelled */}
           {cancelledCount > 0 && (
             <button
@@ -200,7 +238,7 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
               onClick={() => handleClearJobs('all')}
               disabled={clearing !== null}
               className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-dark-800 hover:bg-dark-750 text-slate-300 border border-dark-700 text-xs font-semibold transition-all hover:scale-105 disabled:opacity-50"
-              title="Clear all finished, failed, and cancelled jobs"
+              title="Clear all finished, failed, cancelled, and interrupted jobs"
             >
               <Trash2 className="w-3.5 h-3.5 text-slate-400" />
               <span>Clear All ({totalInactiveCount})</span>
@@ -244,7 +282,8 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
             <div className="flex-1 overflow-y-auto space-y-3 pr-1">
               {jobs.map(job => {
                 const isSelected = selectedJob?.id === job.id;
-                const isActive = ['RUNNING', 'PENDING'].includes(job.status);
+                const isRunning = job.status === 'RUNNING';
+                const isPending = job.status === 'PENDING';
                 return (
                   <div
                     key={job.id}
@@ -252,8 +291,10 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
                     className={`p-4 rounded-xl border transition-all cursor-pointer ${
                       isSelected
                         ? 'bg-dark-800 border-indigo-500 shadow-lg shadow-indigo-950/40 ring-1 ring-indigo-500/50'
-                        : isActive
-                        ? 'bg-dark-850/90 border-indigo-500/40 hover:border-indigo-500/70 hover:bg-dark-800/60'
+                        : isRunning
+                        ? 'bg-dark-850/90 border-indigo-500/50 hover:border-indigo-500/80 hover:bg-dark-800/60'
+                        : isPending
+                        ? 'bg-dark-850/90 border-amber-500/40 hover:border-amber-500/70 hover:bg-dark-800/60'
                         : 'bg-dark-850/80 border-dark-700/80 hover:border-dark-600 hover:bg-dark-800/50'
                     }`}
                   >
@@ -262,10 +303,40 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
                         <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-dark-900 text-indigo-300 border border-dark-700">
                           {job.job_type}
                         </span>
-                        {isActive && (
+                        {isRunning && (
+                          <span className="flex items-center space-x-1 text-[10px] text-indigo-400 font-mono">
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+                            <span>Running</span>
+                          </span>
+                        )}
+                        {isPending && (
                           <span className="flex items-center space-x-1 text-[10px] text-amber-400 font-mono">
-                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                            <span>Active</span>
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                            <span>Pending</span>
+                          </span>
+                        )}
+                        {job.status === 'INTERRUPTED' && (
+                          <span className="flex items-center space-x-1 text-[10px] text-amber-400 font-mono">
+                            <AlertTriangle className="w-3 h-3 text-amber-400" />
+                            <span>Interrupted</span>
+                          </span>
+                        )}
+                        {job.status === 'CANCELLED' && (
+                          <span className="flex items-center space-x-1 text-[10px] text-slate-400 font-mono">
+                            <Ban className="w-3 h-3 text-slate-400" />
+                            <span>Cancelled</span>
+                          </span>
+                        )}
+                        {job.status === 'FAILED' && (
+                          <span className="flex items-center space-x-1 text-[10px] text-rose-400 font-mono">
+                            <AlertCircle className="w-3 h-3 text-rose-400" />
+                            <span>Failed</span>
+                          </span>
+                        )}
+                        {job.status === 'COMPLETED' && (
+                          <span className="flex items-center space-x-1 text-[10px] text-emerald-400 font-mono">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                            <span>Completed</span>
                           </span>
                         )}
                       </div>
@@ -274,18 +345,32 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
                           #{job.id}
                         </span>
                         {['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(job.status) && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteJob(job.id);
-                            }}
-                            disabled={deletingId === job.id}
-                            className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                            title="Delete this job"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
+                          <div className="flex items-center space-x-1">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRestart(job.id);
+                              }}
+                              disabled={restartingId === job.id}
+                              className="p-1 rounded text-slate-500 hover:text-indigo-300 hover:bg-indigo-500/10 transition-colors"
+                              title="Restart this job"
+                            >
+                              <RotateCcw className={`w-3 h-3 ${restartingId === job.id ? 'animate-spin' : ''}`} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteJob(job.id);
+                              }}
+                              disabled={deletingId === job.id}
+                              className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                              title="Delete this job"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -332,7 +417,17 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
                       <h3 className="text-sm font-bold text-white">
                         Job #{selectedJob.id}: {selectedJob.job_type}
                       </h3>
-                      <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-dark-800 text-slate-300">
+                      <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded border ${
+                        selectedJob.status === 'COMPLETED'
+                          ? 'bg-emerald-950/50 text-emerald-300 border-emerald-800/60'
+                          : selectedJob.status === 'FAILED'
+                          ? 'bg-rose-950/50 text-rose-300 border-rose-800/60'
+                          : selectedJob.status === 'INTERRUPTED'
+                          ? 'bg-amber-950/50 text-amber-300 border-amber-800/60'
+                          : selectedJob.status === 'CANCELLED'
+                          ? 'bg-slate-800 text-slate-300 border-slate-700'
+                          : 'bg-indigo-950/50 text-indigo-300 border-indigo-800/60'
+                      }`}>
                         {selectedJob.status}
                       </span>
                     </div>
@@ -352,15 +447,27 @@ export const Activity: React.FC<ActivityProps> = ({ initialJobId }) => {
                     )}
 
                     {['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(selectedJob.status) && (
-                      <button
-                        onClick={() => handleDeleteJob(selectedJob.id)}
-                        disabled={deletingId === selectedJob.id}
-                        className="px-3 py-1.5 rounded-xl bg-dark-800 hover:bg-rose-900/40 text-slate-300 hover:text-rose-200 border border-dark-700 hover:border-rose-700/50 text-xs font-semibold transition-colors flex items-center space-x-1.5"
-                        title="Delete this job from history"
-                      >
-                        <Trash2 className="w-3.5 h-3.5 text-slate-400 hover:text-rose-400" />
-                        <span>Delete Job</span>
-                      </button>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          onClick={() => handleRestart(selectedJob.id)}
+                          disabled={restartingId === selectedJob.id}
+                          className="px-3 py-1.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/30 text-xs font-semibold transition-colors flex items-center space-x-1.5"
+                          title="Restart or resume this task"
+                        >
+                          <RotateCcw className={`w-3.5 h-3.5 ${restartingId === selectedJob.id ? 'animate-spin' : ''}`} />
+                          <span>Restart Task</span>
+                        </button>
+
+                        <button
+                          onClick={() => handleDeleteJob(selectedJob.id)}
+                          disabled={deletingId === selectedJob.id}
+                          className="px-3 py-1.5 rounded-xl bg-dark-800 hover:bg-rose-900/40 text-slate-300 hover:text-rose-200 border border-dark-700 hover:border-rose-700/50 text-xs font-semibold transition-colors flex items-center space-x-1.5"
+                          title="Delete this job from history"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-slate-400 hover:text-rose-400" />
+                          <span>Delete Job</span>
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>

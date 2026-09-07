@@ -127,7 +127,7 @@ async def sync_config_on_startup(db: AsyncSession) -> None:
                     continue
                 except Exception:
                     pass
-            elif v.isdigit() and k in ("max_concurrent_jobs", "max_concurrent_ollama_requests", "ai_batch_size"):
+            elif v.isdigit() and k in ("max_concurrent_jobs", "max_concurrent_ollama_requests"):
                 clean_json_data[k] = int(v)
                 continue
         clean_json_data[k] = v

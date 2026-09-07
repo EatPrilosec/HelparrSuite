@@ -34,7 +34,47 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
+        # Reconcile orphaned jobs from prior server runs (interrupted by server restart/shutdown)
+        try:
+            from datetime import datetime
+            from backend.app.models.job import Job
+            stmt = select(Job).where(Job.status.in_(["RUNNING", "PENDING"]))
+            res = await db.execute(stmt)
+            orphaned = res.scalars().all()
+            for j in orphaned:
+                j.status = "INTERRUPTED"
+                j.finished_at = datetime.utcnow()
+                j.message = "Interrupted by server restart or shutdown."
+                ts = datetime.utcnow().strftime("%H:%M:%S")
+                cur_logs = j.logs or ""
+                j.logs = (cur_logs + f"\n[{ts}] [System] Job was interrupted by application restart/shutdown.") if cur_logs else f"[{ts}] [System] Job was interrupted by application restart/shutdown."
+            if orphaned:
+                await db.commit()
+        except Exception:
+            pass
+
     yield
+
+    # On shutdown, mark any active tasks as INTERRUPTED
+    async with AsyncSessionLocal() as db:
+        try:
+            from datetime import datetime
+            from backend.app.models.job import Job
+            stmt = select(Job).where(Job.status.in_(["RUNNING", "PENDING"]))
+            res = await db.execute(stmt)
+            active_jobs = res.scalars().all()
+            for j in active_jobs:
+                j.status = "INTERRUPTED"
+                j.finished_at = datetime.utcnow()
+                j.message = "Interrupted by server shutdown."
+                ts = datetime.utcnow().strftime("%H:%M:%S")
+                cur_logs = j.logs or ""
+                j.logs = (cur_logs + f"\n[{ts}] [System] Job was interrupted by server shutdown.") if cur_logs else f"[{ts}] [System] Job was interrupted by server shutdown."
+            if active_jobs:
+                await db.commit()
+        except Exception:
+            pass
+
 
 
 app = FastAPI(
